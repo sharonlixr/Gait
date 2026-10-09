@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -171,7 +171,7 @@ function start() {
         <div class="arow"><button class="an">Analyze pose</button></div>
         <div class="report" style="display:none"></div>`;
       const vid = card.querySelector('video'), rep = card.querySelector('.report');
-      if (item.report) { rep.style.display = 'block'; showReport(rep, item.report); }
+      if (item.report) { rep.style.display = 'block'; showReport(rep, item.report, { title: item.title }); }
       card.querySelector('.dl').onclick = async () => {
         const r = await sb.storage.from('videos').createSignedUrl(item.path, 300, { download: item.title || true });
         if (r.data) location.href = r.data.signedUrl;
@@ -182,7 +182,7 @@ function start() {
         await sb.from('videos').delete().eq('id', item.id);
         loadGrid();
       };
-      card.querySelector('.an').onclick = () => analyze(vid, rep, item.id);
+      card.querySelector('.an').onclick = () => analyze(vid, rep, item.id, item.title);
       grid.appendChild(card);
     });
   }
@@ -249,6 +249,11 @@ function start() {
     const vals = rows.filter(r => r.m).map(r => r.m[cat][key]).filter(v => v !== null && v !== undefined);
     return vals.length ? (vals.reduce((a, b) => a + Math.abs(b), 0) / vals.length).toFixed(1) : '—';
   }
+  // same calculation as avgOf but returns a real number (or null) for sending as JSON, not a display string
+  function avgNum(rows, cat, key) {
+    const vals = rows.filter(r => r.m).map(r => r.m[cat][key]).filter(v => v !== null && v !== undefined);
+    return vals.length ? +(vals.reduce((a, b) => a + Math.abs(b), 0) / vals.length).toFixed(1) : null;
+  }
 
   function table(rows, cat, cols) {
     return `<table style="width:100%;border-collapse:collapse;font-size:12px;color:var(--muted);margin-top:6px">
@@ -299,7 +304,72 @@ function start() {
     return 'This clip\u2019s rhythm sits in a mixed range, without a clear lean toward younger or older walking patterns.';
   }
 
-  function showReport(el, rows) {
+  // Builds the payload from data this app has actually already computed —
+  // nothing here is invented; every field traces back to metricsFromLandmarks() / gaitMetrics().
+  function buildAssessmentPayload(rows, meta) {
+    const g = gaitMetrics(rows);
+    const age = gaitAgeEstimate(g);
+    return {
+      video_title: meta && meta.title || null,
+      frames_sampled: rows.length,
+      frames_with_pose: rows.filter(r => r.m).length,
+      gait: { cadence_steps_per_min: g.cadence, step_time_variability_pct: g.cv, knee_range_of_motion_deg: g.kneeROM, step_cycles_detected: g.steps },
+      gait_age_estimate: age ? { low: age.low, high: age.high, mid: age.mid } : null,
+      posture_avg: {
+        shoulder_tilt_deg: avgNum(rows, 'posture', 'shoulderTilt'), hip_tilt_deg: avgNum(rows, 'posture', 'hipTilt'),
+        head_offset_pct: avgNum(rows, 'posture', 'headOffset'), spine_lean_pct: avgNum(rows, 'posture', 'spineLean')
+      },
+      form_avg: {
+        left_elbow_deg: avgNum(rows, 'form', 'leftElbow'), right_elbow_deg: avgNum(rows, 'form', 'rightElbow'),
+        left_knee_deg: avgNum(rows, 'form', 'leftKnee'), right_knee_deg: avgNum(rows, 'form', 'rightKnee')
+      },
+      symmetry_avg: {
+        shoulder_height_diff_pct: avgNum(rows, 'symmetry', 'shoulderHeightDiff'), hip_height_diff_pct: avgNum(rows, 'symmetry', 'hipHeightDiff'),
+        wrist_height_diff_pct: avgNum(rows, 'symmetry', 'wristHeightDiff')
+      },
+      frames: rows.map(r => r.m ? { t: r.t, posture: r.m.posture, form: r.m.form, symmetry: r.m.symmetry } : { t: r.t, no_pose: true })
+    };
+  }
+
+  function renderAssessment(box, data) {
+    if (!data || typeof data !== 'object') { box.innerHTML = '<div class="err">The assessment service returned an unexpected response.</div>'; return; }
+    const sections = [
+      ['Summary', data.summary],
+      ['Strengths', data.strengths],
+      ['Areas to improve', data.improvement_areas || data.improvementAreas],
+      ['Data limitations', data.data_limitations || data.limitations],
+      ['Training plan', data.training_plan || data.trainingPlan]
+    ];
+    let html = '';
+    sections.forEach(([label, val]) => {
+      if (!val) return;
+      const content = Array.isArray(val) ? '<ul style="margin:4px 0 0;padding-left:18px">' + val.map(v => '<li>' + esc(String(v)) + '</li>').join('') + '</ul>' : '<p style="margin:4px 0 0">' + esc(String(val)) + '</p>';
+      html += '<div style="margin-top:10px"><b>' + label + '</b>' + content + '</div>';
+    });
+    box.innerHTML = html || '<div class="dim">Assessment received, but none of the expected fields (summary, strengths, improvement_areas, data_limitations, training_plan) were present. Raw response: ' + esc(JSON.stringify(data)) + '</div>';
+  }
+
+  async function requestAssessment(btn, box, rows, meta) {
+    if (btn.disabled) return; // guards against double-taps / repeat clicks while a request is in flight
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Getting AI assessment…';
+    box.style.display = 'block';
+    box.innerHTML = '<span class="dim">Contacting assessment service…</span>';
+    try {
+      const payload = buildAssessmentPayload(rows, meta);
+      const { data, error } = await sb.functions.invoke('dynamic-responder', { body: payload });
+      if (error) throw error;
+      renderAssessment(box, data);
+    } catch (e) {
+      box.innerHTML = '<div class="err">Could not get an AI assessment: ' + esc(String((e && e.message) || e)) + '</div>';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  function showReport(el, rows, meta) {
     const ok = rows.filter(r => r.m);
     if (!ok.length) { el.innerHTML = '<div class="err">No pose detected. Use a video where the full body is clearly visible.</div>'; return; }
     let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>`;
@@ -322,11 +392,15 @@ function start() {
         <div class="dim" style="margin-top:6px;font-size:11px">Not a medical or validated measurement — a rough heuristic based on published population trends in walking speed, step consistency and knee motion, with a deliberately wide range. Accuracy depends heavily on a clear, full-body, side-on walking shot.</div>
       </div>`;
     }
+    html += `<div style="margin-top:14px"><button class="aiBtn" style="width:100%">Get AI assessment</button>
+      <div class="aiBox" style="display:none;margin-top:8px"></div></div>`;
     el.innerHTML = html;
+    const aiBtn = el.querySelector('.aiBtn'), aiBox = el.querySelector('.aiBox');
+    if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, meta);
     return { gait: SHOW_GAIT ? gaitMetrics(rows) : null, age: SHOW_GAIT ? gaitAgeEstimate(gaitMetrics(rows)) : null };
   }
 
-  async function analyze(vid, rep, id) {
+  async function analyze(vid, rep, id, title) {
     rep.style.display = 'block';
     const say = m => { rep.innerHTML = '<span class="dim">' + esc(m) + '</span>'; };
     let lm;
@@ -347,7 +421,7 @@ function start() {
       }
     } catch (e) { rep.innerHTML = '<div class="err">Analysis failed: ' + esc(String((e && e.message) || e)) + '</div>'; return; }
     vid.currentTime = back;
-    const { gait, age } = showReport(rep, rows);
+    const { gait, age } = showReport(rep, rows, { title });
     await sb.from('videos').update({ report: rows }).eq('id', id);
     if (gait && gait.cadence !== null) {
       await sb.from('gait_history').insert({
