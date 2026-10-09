@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -111,6 +111,18 @@ function start() {
   function renderDash() {
     app.innerHTML = `<div class="upload"><p>Upload a video. It is saved to your account and available on any device.</p>
       <button class="primary" id="pick">Choose video</button><input type="file" id="file" accept="video/*">
+      <div style="margin-top:14px;text-align:left;font-size:12px;color:var(--muted)">Optional — helps the AI assessment be more accurate:
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <input id="subAge" type="number" placeholder="Age" style="width:80px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
+          <input id="subHeight" type="number" placeholder="Height (cm)" style="width:120px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
+          <select id="subView" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
+            <option value="">Camera view (optional)</option>
+            <option value="front">Front</option>
+            <option value="side">Side</option>
+            <option value="rear">Rear</option>
+          </select>
+        </div>
+      </div>
       <div class="msg" id="upmsg"></div></div>
       <div class="grid" id="grid"></div>
       <div style="margin-top:36px"><b>Gait age history</b>
@@ -127,7 +139,13 @@ function start() {
       const path = user.id + '/' + Date.now() + '_' + safe;
       const up = await sb.storage.from('videos').upload(path, f, { contentType: f.type || 'video/mp4' });
       if (up.error) { m.className = 'msg'; m.textContent = 'Upload failed: ' + up.error.message; return; }
-      const ins = await sb.from('videos').insert({ title: f.name, path });
+      const ageV = document.getElementById('subAge').value, hV = document.getElementById('subHeight').value, vV = document.getElementById('subView').value;
+      const ins = await sb.from('videos').insert({
+        title: f.name, path,
+        subject_age: ageV ? +ageV : null,
+        subject_height_cm: hV ? +hV : null,
+        camera_view: vV || null
+      });
       if (ins.error) { m.className = 'msg'; m.textContent = 'Saved file but not record: ' + ins.error.message; return; }
       m.textContent = ''; file.value = '';
       loadGrid();
@@ -171,7 +189,7 @@ function start() {
         <div class="arow"><button class="an">Analyze pose</button></div>
         <div class="report" style="display:none"></div>`;
       const vid = card.querySelector('video'), rep = card.querySelector('.report');
-      if (item.report) { rep.style.display = 'block'; showReport(rep, item.report, { title: item.title }); }
+      if (item.report) { rep.style.display = 'block'; showReport(rep, item.report, vid, item); }
       card.querySelector('.dl').onclick = async () => {
         const r = await sb.storage.from('videos').createSignedUrl(item.path, 300, { download: item.title || true });
         if (r.data) location.href = r.data.signedUrl;
@@ -182,7 +200,7 @@ function start() {
         await sb.from('videos').delete().eq('id', item.id);
         loadGrid();
       };
-      card.querySelector('.an').onclick = () => analyze(vid, rep, item.id, item.title);
+      card.querySelector('.an').onclick = () => analyze(vid, rep, item);
       grid.appendChild(card);
     });
   }
@@ -304,30 +322,97 @@ function start() {
     return 'This clip\u2019s rhythm sits in a mixed range, without a clear lean toward younger or older walking patterns.';
   }
 
+  // Derives the six requested gait metrics + quality fields from raw per-frame landmark data.
+  // Height (cm) is only used to convert screen-space units into real meters; without it,
+  // stepWidthVariability/walkingSpeedMps are returned as normalized (unitless) values instead.
+  function computeExtendedGait(rows, heightCm, vidW, vidH) {
+    const ok = rows.filter(r => r.m && r.lay !== undefined);
+    const t = ok.map(r => r.t), lay = ok.map(r => r.lay), ray = ok.map(r => r.ray);
+    const minimaT = (arr) => { const out = []; for (let i = 1; i < arr.length - 1; i++) if (arr[i] < arr[i - 1] && arr[i] < arr[i + 1]) out.push(t[i]); return out; };
+    const lMin = minimaT(lay), rMin = minimaT(ray);
+    const combined = [...lMin, ...rMin].sort((a, b) => a - b);
+    const combinedInt = []; for (let i = 1; i < combined.length; i++) combinedInt.push(combined[i] - combined[i - 1]);
+    const meanCombined = combinedInt.length ? combinedInt.reduce((a, b) => a + b, 0) / combinedInt.length : null;
+    const cadence = meanCombined ? +(60 / meanCombined).toFixed(1) : null;
+
+    const intervalsOf = (arr) => { const o = []; for (let i = 1; i < arr.length; i++) o.push(arr[i] - arr[i - 1]); return o; };
+    const lInt = intervalsOf(lMin), rInt = intervalsOf(rMin);
+    const lAvg = lInt.length ? lInt.reduce((a, b) => a + b, 0) / lInt.length : null;
+    const rAvg = rInt.length ? rInt.reduce((a, b) => a + b, 0) / rInt.length : null;
+    const stepTimeAsymmetry = (lAvg && rAvg) ? +(Math.abs(lAvg - rAvg) / ((lAvg + rAvg) / 2)).toFixed(3) : null;
+
+    const trunkXs = ok.map(r => r.trunkX);
+    const trunkSway = trunkXs.length ? +(Math.max(...trunkXs) - Math.min(...trunkXs)).toFixed(3) : null;
+
+    const lwx = ok.map(r => r.lwx), rwx = ok.map(r => r.rwx);
+    const lAmp = lwx.length ? Math.max(...lwx) - Math.min(...lwx) : null;
+    const rAmp = rwx.length ? Math.max(...rwx) - Math.min(...rwx) : null;
+    const armSwingAsymmetry = (lAmp != null && rAmp != null && (lAmp + rAmp) > 0) ? +(Math.abs(lAmp - rAmp) / ((lAmp + rAmp) / 2)).toFixed(3) : null;
+
+    let metersPerPixelX = null;
+    if (heightCm && vidW && vidH) {
+      const heights = ok.map(r => r.bodyPxH).filter(v => v && v > 0);
+      if (heights.length) metersPerPixelX = (heightCm / 100) / (heights.reduce((a, b) => a + b, 0) / heights.length);
+    }
+
+    const widths = ok.map(r => Math.abs(r.lax - r.rax));
+    let stepWidthVariability = null, stepWidthUnit = 'normalized';
+    if (widths.length > 1) {
+      const m = widths.reduce((a, b) => a + b, 0) / widths.length;
+      const sd = Math.sqrt(widths.reduce((s, v) => s + (v - m) ** 2, 0) / widths.length);
+      if (metersPerPixelX) { stepWidthVariability = +(sd * vidW * metersPerPixelX).toFixed(3); stepWidthUnit = 'meters'; }
+      else { stepWidthVariability = +sd.toFixed(3); }
+    }
+
+    let walkingSpeedMps = null, speedUnit = 'normalized/sec';
+    if (trunkXs.length > 1 && t.length > 1) {
+      const dtSec = t[t.length - 1] - t[0];
+      if (dtSec > 0) {
+        const dxNorm = Math.abs(trunkXs[trunkXs.length - 1] - trunkXs[0]);
+        if (metersPerPixelX) { walkingSpeedMps = +((dxNorm * vidW * metersPerPixelX) / dtSec).toFixed(3); speedUnit = 'm/s'; }
+        else walkingSpeedMps = +(dxNorm / dtSec).toFixed(3);
+      }
+    }
+
+    const validFrameRatio = rows.length ? +(ok.length / rows.length).toFixed(2) : null;
+    const visVals = ok.map(r => r.vis).filter(v => v != null);
+    const landmarkVisibility = visVals.length ? +(visVals.reduce((a, b) => a + b, 0) / visVals.length).toFixed(2) : null;
+
+    return { cadence, stepTimeAsymmetry, trunkSway, armSwingAsymmetry, stepWidthVariability, stepWidthUnit, walkingSpeedMps, speedUnit, validFrameRatio, landmarkVisibility, validGaitCycles: combinedInt.length, calibrated: !!metersPerPixelX };
+  }
+
+  function qualityLabel(validFrameRatio, landmarkVisibility) {
+    if (validFrameRatio == null || landmarkVisibility == null) return 'unknown';
+    const s = (validFrameRatio + landmarkVisibility) / 2;
+    return s > 0.8 ? 'good' : s > 0.5 ? 'fair' : 'poor';
+  }
+
   // Builds the payload from data this app has actually already computed —
   // nothing here is invented; every field traces back to metricsFromLandmarks() / gaitMetrics().
-  function buildAssessmentPayload(rows, meta) {
-    const g = gaitMetrics(rows);
-    const age = gaitAgeEstimate(g);
+  function buildAssessmentPayload(rows, vid, item) {
+    const heightCm = item && item.subject_height_cm || null;
+    const eg = computeExtendedGait(rows, heightCm, vid.videoWidth, vid.videoHeight);
+    const notes = [];
+    if (!item || item.subject_age == null) notes.push('userAge was not provided by the uploader; it is self-reported, not derived from the video.');
+    if (!item || !item.camera_view) notes.push('cameraView was not selected by the uploader; it cannot be reliably auto-detected from pose landmarks.');
+    if (!eg.calibrated) notes.push('No height was provided, so stepWidthVariability and walkingSpeedMps are normalized (unitless) screen-space values, not real-world meters/m/s.');
+    if (eg.validGaitCycles < 2) notes.push('Very few gait cycles were detected in this clip; metrics derived from step timing may be unreliable.');
+
     return {
-      video_title: meta && meta.title || null,
-      frames_sampled: rows.length,
-      frames_with_pose: rows.filter(r => r.m).length,
-      gait: { cadence_steps_per_min: g.cadence, step_time_variability_pct: g.cv, knee_range_of_motion_deg: g.kneeROM, step_cycles_detected: g.steps },
-      gait_age_estimate: age ? { low: age.low, high: age.high, mid: age.mid } : null,
-      posture_avg: {
-        shoulder_tilt_deg: avgNum(rows, 'posture', 'shoulderTilt'), hip_tilt_deg: avgNum(rows, 'posture', 'hipTilt'),
-        head_offset_pct: avgNum(rows, 'posture', 'headOffset'), spine_lean_pct: avgNum(rows, 'posture', 'spineLean')
+      userAge: (item && item.subject_age) ?? null,
+      videoDurationSeconds: vid.duration ? +vid.duration.toFixed(1) : null,
+      cameraView: (item && item.camera_view) || 'unknown',
+      poseQuality: qualityLabel(eg.validFrameRatio, eg.landmarkVisibility),
+      metrics: {
+        cadenceStepsPerMin: { value: eg.cadence, unit: 'steps/min', method: 'detected foot events' },
+        stepTimeAsymmetry: { value: eg.stepTimeAsymmetry, unit: 'ratio', method: 'absolute left-right step-time difference divided by mean step time' },
+        trunkSway: { value: eg.trunkSway, unit: 'normalized displacement', method: 'lateral trunk movement across gait cycles' },
+        armSwingAsymmetry: { value: eg.armSwingAsymmetry, unit: 'ratio', method: 'left-right arm swing amplitude difference' },
+        stepWidthVariability: { value: eg.stepWidthVariability, unit: eg.stepWidthUnit === 'meters' ? 'meters' : 'normalized', method: 'variability of lateral foot placement' },
+        walkingSpeedMps: { value: eg.walkingSpeedMps, unit: eg.speedUnit, method: eg.calibrated ? 'calibrated displacement over time' : 'uncalibrated displacement over time (no height provided)' }
       },
-      form_avg: {
-        left_elbow_deg: avgNum(rows, 'form', 'leftElbow'), right_elbow_deg: avgNum(rows, 'form', 'rightElbow'),
-        left_knee_deg: avgNum(rows, 'form', 'leftKnee'), right_knee_deg: avgNum(rows, 'form', 'rightKnee')
-      },
-      symmetry_avg: {
-        shoulder_height_diff_pct: avgNum(rows, 'symmetry', 'shoulderHeightDiff'), hip_height_diff_pct: avgNum(rows, 'symmetry', 'hipHeightDiff'),
-        wrist_height_diff_pct: avgNum(rows, 'symmetry', 'wristHeightDiff')
-      },
-      frames: rows.map(r => r.m ? { t: r.t, posture: r.m.posture, form: r.m.form, symmetry: r.m.symmetry } : { t: r.t, no_pose: true })
+      quality: { validFrameRatio: eg.validFrameRatio, validGaitCycles: eg.validGaitCycles, landmarkVisibility: eg.landmarkVisibility },
+      notes
     };
   }
 
@@ -349,7 +434,7 @@ function start() {
     box.innerHTML = html || '<div class="dim">Assessment received, but none of the expected fields (summary, strengths, improvement_areas, data_limitations, training_plan) were present. Raw response: ' + esc(JSON.stringify(data)) + '</div>';
   }
 
-  async function requestAssessment(btn, box, rows, meta) {
+  async function requestAssessment(btn, box, rows, vid, item) {
     if (btn.disabled) return; // guards against double-taps / repeat clicks while a request is in flight
     btn.disabled = true;
     const original = btn.textContent;
@@ -357,7 +442,7 @@ function start() {
     box.style.display = 'block';
     box.innerHTML = '<span class="dim">Contacting assessment service…</span>';
     try {
-      const payload = buildAssessmentPayload(rows, meta);
+      const payload = buildAssessmentPayload(rows, vid, item);
       const { data, error } = await sb.functions.invoke('dynamic-responder', { body: payload });
       if (error) throw error;
       renderAssessment(box, data);
@@ -369,7 +454,7 @@ function start() {
     }
   }
 
-  function showReport(el, rows, meta) {
+  function showReport(el, rows, vid, item) {
     const ok = rows.filter(r => r.m);
     if (!ok.length) { el.innerHTML = '<div class="err">No pose detected. Use a video where the full body is clearly visible.</div>'; return; }
     let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>`;
@@ -396,11 +481,12 @@ function start() {
       <div class="aiBox" style="display:none;margin-top:8px"></div></div>`;
     el.innerHTML = html;
     const aiBtn = el.querySelector('.aiBtn'), aiBox = el.querySelector('.aiBox');
-    if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, meta);
+    if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, vid, item);
     return { gait: SHOW_GAIT ? gaitMetrics(rows) : null, age: SHOW_GAIT ? gaitAgeEstimate(gaitMetrics(rows)) : null };
   }
 
-  async function analyze(vid, rep, id, title) {
+  async function analyze(vid, rep, item) {
+    const id = item.id;
     rep.style.display = 'block';
     const say = m => { rep.innerHTML = '<span class="dim">' + esc(m) + '</span>'; };
     let lm;
@@ -417,11 +503,18 @@ function start() {
         const p = res.landmarks && res.landmarks[0];
         const T = +t.toFixed(1);
         if (!p) { rows.push({ t: T, m: null }); continue; }
-        rows.push({ t: T, m: metricsFromLandmarks(p), lay: p[27].y });
+        rows.push({
+          t: T, m: metricsFromLandmarks(p),
+          lay: p[27].y, ray: p[28].y, lax: p[27].x, rax: p[28].x,
+          lwx: p[15].x, rwx: p[16].x,
+          trunkX: ((p[11].x + p[12].x) / 2 + (p[23].x + p[24].x) / 2) / 2,
+          vis: p.reduce((a, q) => a + (q.visibility || 0), 0) / p.length,
+          bodyPxH: (((p[27].y + p[28].y) / 2) - p[0].y) * (vid.videoHeight || 0)
+        });
       }
     } catch (e) { rep.innerHTML = '<div class="err">Analysis failed: ' + esc(String((e && e.message) || e)) + '</div>'; return; }
     vid.currentTime = back;
-    const { gait, age } = showReport(rep, rows, { title });
+    const { gait, age } = showReport(rep, rows, vid, item);
     await sb.from('videos').update({ report: rows }).eq('id', id);
     if (gait && gait.cadence !== null) {
       await sb.from('gait_history').insert({
