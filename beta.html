@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -581,7 +581,7 @@ function start() {
     catch (e) { rep.innerHTML = '<div class="err">Could not load the pose model: ' + esc(String((e && e.message) || e)) + '</div>'; return; }
     if (!vid.duration || !isFinite(vid.duration)) { rep.innerHTML = '<div class="err">Video not ready yet, try again in a moment.</div>'; return; }
     // ~4 samples/second (enough to catch each step's up-down motion), capped between 16 and 80
-    const N = Math.min(80, Math.max(16, Math.round(duration * 4))), rows = [], back = vid.currentTime; vid.pause();
+    const N = Math.min(80, Math.max(16, Math.round(vid.duration * 4))), rows = [], back = vid.currentTime; vid.pause();
     say('Analyzing ' + N + ' frames...');
     try {
       for (let i = 0; i < N; i++) {
