@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -125,7 +125,11 @@ function start() {
       </div>
       <div class="msg" id="upmsg"></div></div>
       <div class="grid" id="grid"></div>
-      <div style="margin-top:36px"><b>Gait age history</b>
+      <div style="margin-top:28px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <span id="refStatus" class="dim" style="font-size:11px">Reference table: loading…</span>
+        <button class="text" id="refreshRef" style="border:1px solid var(--border);border-radius:8px">Refresh reference data</button>
+      </div>
+      <div style="margin-top:28px"><b>Gait age history</b>
         <div class="dim" style="font-size:12px;margin:4px 0 10px">Every time you run Analyze pose on a walking clip, the parameters and estimate are saved here so you can compare over time.</div>
         <div id="history"></div>
       </div>`;
@@ -152,6 +156,12 @@ function start() {
     };
     loadGrid();
     loadHistory();
+    loadReferenceData();
+    document.getElementById('refreshRef').onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Refreshing…';
+      await loadReferenceData();
+      e.target.disabled = false; e.target.textContent = 'Refresh reference data';
+    };
   }
 
   async function loadHistory() {
@@ -328,6 +338,55 @@ function start() {
   }
 
   function avg(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+
+  // Source: PMC6660692 (PubMed Central) — healthy-adult gait parameters by age decade,
+  // motion-capture study. 10-19 band excluded (adolescent growth skews it for adult comparison).
+  // kneeHeightVar is used as an approximate stand-in for foot clearance; the published age
+  // trend for it is weak/noisy, so matches from it are flagged low-confidence.
+  // Hardcoded fallback only — the live source of truth is the gait_reference table in Supabase.
+  let referenceData = [
+    { band: '20-29', mid: 24.5, cadence: 107.43, strideLength: 1.32, kneeROM: 50.66, kneeHeightVar: 0.10 },
+    { band: '30-39', mid: 34.5, cadence: 107.87, strideLength: 1.29, kneeROM: 50.33, kneeHeightVar: 0.10 },
+    { band: '40-49', mid: 44.5, cadence: 112.37, strideLength: 1.27, kneeROM: 50.53, kneeHeightVar: 0.10 },
+    { band: '50-59', mid: 54.5, cadence: 111.15, strideLength: 1.25, kneeROM: 47.97, kneeHeightVar: 0.09 },
+    { band: '60-69', mid: 64.5, cadence: 107.56, strideLength: 1.19, kneeROM: 47.75, kneeHeightVar: 0.08 },
+    { band: '70+', mid: 77, cadence: 102.04, strideLength: 1.05, kneeROM: 46.38, kneeHeightVar: 0.11 }
+  ];
+  let referenceSource = 'built-in default', referenceLoadedAt = null;
+
+  async function loadReferenceData() {
+    try {
+      const { data, error } = await sb.from('gait_reference').select('*').order('mid');
+      if (!error && data && data.length) {
+        referenceData = data.map(r => ({ band: r.band, mid: +r.mid, cadence: +r.cadence, strideLength: +r.stride_length, kneeROM: +r.knee_rom, kneeHeightVar: +r.knee_height_var }));
+        referenceSource = 'Supabase'; referenceLoadedAt = new Date();
+      }
+    } catch (e) { /* keep whatever referenceData currently holds */ }
+    const el = document.getElementById('refStatus');
+    if (el) el.textContent = `Reference table: ${referenceData.length} bands, from ${referenceSource}${referenceLoadedAt ? ' at ' + referenceLoadedAt.toLocaleTimeString() : ''}`;
+  }
+
+  function matchAge(value, key) {
+    if (value == null) return null;
+    let best = null, bestDiff = Infinity;
+    referenceData.forEach(b => { const d = Math.abs(b[key] - value); if (d < bestDiff) { bestDiff = d; best = b; } });
+    return best ? best.mid : null;
+  }
+  // Compares this video's 5-category measurements against GAIT_REFERENCE and equally
+  // weights whichever categories have a valid, unit-matched comparison into one score.
+  function compareToReference(c) {
+    const out = {
+      cadenceAge: matchAge(c.rhythm.cadence, 'cadence'),
+      strideAge: c.stride.reliable ? matchAge(c.stride.strideLengthM, 'strideLength') : null,
+      kneeAge: matchAge(c.kneeHip.kneeROM, 'kneeROM'),
+      clearanceAge: c.footClearance.calibrated ? matchAge(c.footClearance.clearanceCm / 100, 'kneeHeightVar') : null,
+      trunkAge: null // not scored — source trunk data is in degrees from body sensors, not comparable to this app's screen-based normalized trunk measurement
+    };
+    const used = ['cadenceAge', 'strideAge', 'kneeAge', 'clearanceAge'].filter(k => out[k] != null);
+    out.totalScore = used.length ? +(used.reduce((s, k) => s + out[k], 0) / used.length).toFixed(1) : null;
+    out.categoriesUsed = used.length;
+    return out;
+  }
 
   // Computes the 5 user-defined measurement categories from the same raw per-frame landmark data.
   function computeFiveCategories(rows, heightCm, vidW, vidH, cameraView) {
@@ -564,6 +623,17 @@ function start() {
         ${row('Lateral trunk sway', c.trunk.swayNormalized, '(normalized)')}
         ${row('Movement smoothness (lower = smoother)', c.trunk.smoothnessVariabilityPct, '%')}
       </div>`;
+    const cmp = compareToReference(c);
+    html += `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px"><b>Reference-based gait age (test)</b>
+      <div class="dim" style="font-size:11px;margin-top:2px">Nearest-matching age band vs. a published healthy-adult gait study (decade bands, 20s\u201370+), per category:</div>
+      ${row('From cadence', cmp.cadenceAge, 'yrs')}
+      ${row('From stride length', cmp.strideAge, 'yrs')}
+      ${row('From knee range of motion', cmp.kneeAge, 'yrs')}
+      ${row('From foot clearance (low confidence)', cmp.clearanceAge, 'yrs')}
+      <div class="dim" style="font-size:11px;margin-top:2px">Trunk not scored \u2014 this app measures trunk sway as normalized camera movement; the reference study measured it in degrees with body sensors, so the two aren\u2019t directly comparable.</div>
+      <div style="margin-top:6px"><b>Total gait age score: ${cmp.totalScore ?? '\u2014'}${cmp.totalScore != null ? ' yrs' : ''} (equal-weighted across ${cmp.categoriesUsed} of 4 scorable categories)</b></div>
+      <div class="dim" style="font-size:11px;margin-top:4px">Experimental test only. Matched against one published sample, not a clinical or diagnostic tool, and not validated against this app\u2019s own camera-based measurement method.</div>
+    </div>`;
     html += `<div style="margin-top:14px"><button class="aiBtn" style="width:100%">Get AI assessment</button>
       <div class="aiBox" style="display:none;margin-top:8px"></div></div>`;
     el.innerHTML = html;
@@ -608,6 +678,7 @@ function start() {
     const heightCm = item.subject_height_cm || null, camView = item.camera_view || null;
     const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
     const legacyAge = gaitAgeEstimate(gaitMetrics(rows)); // kept for continuity with earlier saved history rows
+    const cmp = compareToReference(c);
     if (c.rhythm.cadence !== null) {
       await sb.from('gait_history').insert({
         video_id: id,
@@ -619,7 +690,9 @@ function start() {
         avg_left_hip: c.kneeHip.avgLeftHip, avg_right_hip: c.kneeHip.avgRightHip,
         foot_clearance_cm: c.footClearance.clearanceCm,
         trunk_sway: c.trunk.swayNormalized, trunk_smoothness: c.trunk.smoothnessVariabilityPct,
-        age_low: legacyAge ? legacyAge.low : null, age_high: legacyAge ? legacyAge.high : null, age_mid: legacyAge ? legacyAge.mid : null
+        age_low: legacyAge ? legacyAge.low : null, age_high: legacyAge ? legacyAge.high : null, age_mid: legacyAge ? legacyAge.mid : null,
+        cadence_age: cmp.cadenceAge, stride_age: cmp.strideAge, knee_age: cmp.kneeAge, clearance_age: cmp.clearanceAge,
+        total_gait_age_score: cmp.totalScore, categories_used: cmp.categoriesUsed
       });
       loadHistory();
     }
