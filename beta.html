@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // The only account allowed to refresh the reference table from the app. Everyone can still VIEW it.
 const OWNER_EMAIL = 'sharonlixr@gmail.com';
 // =================================================
@@ -164,6 +164,7 @@ function start() {
     loadGrid();
     loadHistory();
     loadReferenceData();
+    loadWeights();
   }
 
   let versionsCache = [];
@@ -182,11 +183,17 @@ function start() {
         <select id="sourceSelect" ${isOwner ? '' : 'disabled'} style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:12px"></select>
         <div id="sourceDetail" class="dim" style="font-size:11px;margin-top:6px;line-height:1.5"></div>
       </div>
-      <div>
+      <div style="margin-bottom:10px">
         <label class="dim" style="display:block;font-size:11px;margin-bottom:4px">Refresh source</label>
         <select id="refreshSelect" disabled style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:12px"></select>
         ${isOwner ? '<button class="text" id="refreshBtn" style="border:1px solid var(--border);border-radius:8px;margin-top:8px;width:100%">Check for updated research data</button>' : ''}
         <div id="refreshStatus" class="dim" style="font-size:11px;margin-top:6px"></div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:10px">
+        <label class="dim" style="display:block;font-size:11px;margin-bottom:4px">Calculation weight (owner only)</label>
+        <div class="dim" style="font-size:11px;margin-bottom:6px">How much each measurement counts toward the total gait age score. Equal (1 each) reproduces a plain average.</div>
+        <div id="weightRows"></div>
+        ${isOwner ? '<button class="primary" id="saveWeights" style="margin-top:8px;width:100%">Save weights</button><div id="weightStatus" class="dim" style="font-size:11px;margin-top:6px"></div>' : ''}
       </div>`;
 
     await loadVersions();
@@ -233,6 +240,33 @@ function start() {
         status.textContent = 'Could not check for updates: ' + esc(String((err && err.message) || err));
       }
       e.target.disabled = false; e.target.textContent = 'Check for updated research data';
+    };
+
+    await loadWeights();
+    const weightRows = document.getElementById('weightRows');
+    weightRows.innerHTML = Object.keys(WEIGHT_LABELS).map(k => `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0">
+        <span style="font-size:12px">${esc(WEIGHT_LABELS[k])}</span>
+        <input class="weightInput" data-key="${k}" type="number" min="0" step="0.1" value="${gaitWeights[k]}" ${isOwner ? '' : 'disabled'} style="width:70px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:8px;font-size:12px;text-align:right">
+      </div>`).join('');
+    if (isOwner) document.getElementById('saveWeights').onclick = async (e) => {
+      const status = document.getElementById('weightStatus');
+      e.target.disabled = true; e.target.textContent = 'Saving…';
+      try {
+        const rows = Array.from(panel.querySelectorAll('.weightInput')).map(inp => ({
+          metric_key: inp.dataset.key, label: WEIGHT_LABELS[inp.dataset.key],
+          weight: inp.value === '' ? 1 : +inp.value, updated_at: new Date().toISOString()
+        }));
+        for (const r of rows) {
+          const { error } = await sb.from('gait_weights').upsert(r, { onConflict: 'metric_key' });
+          if (error) throw error;
+        }
+        await loadWeights();
+        status.textContent = 'Saved. New weights apply the next time a video is analyzed or its report is reopened.';
+      } catch (err) {
+        status.textContent = 'Could not save weights: ' + esc(String((err && err.message) || err));
+      }
+      e.target.disabled = false; e.target.textContent = 'Save weights';
     };
   }
 
@@ -360,7 +394,24 @@ function start() {
         e.target.disabled = false; e.target.textContent = 'Save';
         loadGrid();
       };
-      card.querySelector('.an').onclick = () => analyze(vid, rep, item);
+      card.querySelector('.an').onclick = () => {
+        if (item.subject_height_cm || item.subject_age) { analyze(vid, rep, item); return; }
+        rep.style.display = 'block';
+        rep.innerHTML = `<div style="padding:10px 0">
+          <div style="margin-bottom:8px">Add age and height now? Both are optional — stride length and foot clearance are more accurate with height, and the AI assessment can compare to your stated age. You can skip this and analyze without them.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="promptAdd primary">Add age / height</button>
+            <button class="promptSkip">Skip, analyze now</button>
+          </div>
+        </div>`;
+        rep.querySelector('.promptAdd').onclick = () => {
+          infoBox.style.display = 'block';
+          const hInput = card.querySelector('.fHeight');
+          if (hInput) { hInput.focus(); hInput.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+          rep.style.display = 'none';
+        };
+        rep.querySelector('.promptSkip').onclick = () => analyze(vid, rep, item);
+      };
       grid.appendChild(card);
     });
   }
@@ -509,13 +560,22 @@ function start() {
   // kneeHeightVar is used as an approximate stand-in for foot clearance; the published age
   // trend for it is weak/noisy, so matches from it are flagged low-confidence.
   // Hardcoded fallback only — the live source of truth is the gait_reference table in Supabase.
+  //
+  // spineLean / headOffset / smoothness columns: App estimate, not a direct citation. No
+  // published study measures these in this app's own screen-normalized units, so this is a
+  // synthetic illustrative curve: perfect score anchored at age 25 (0% lean, 0% offset, 0%
+  // smoothness variability), degrading with age in the DIRECTION that published postural-control
+  // and gait-smoothness aging research consistently reports (balance, trunk control, and movement
+  // smoothness all decline with age) -- but the specific numbers are this app's own assumption,
+  // not a measured value from any one paper. Labeled as such wherever shown, and deliberately
+  // left OUT of the weighted total gait age score -- test-only, for directional/visual reference.
   let referenceData = [
-    { band: '20-29', mid: 24.5, cadence: 107.43, strideLength: 1.32, kneeROM: 50.66, kneeHeightVar: 0.10 },
-    { band: '30-39', mid: 34.5, cadence: 107.87, strideLength: 1.29, kneeROM: 50.33, kneeHeightVar: 0.10 },
-    { band: '40-49', mid: 44.5, cadence: 112.37, strideLength: 1.27, kneeROM: 50.53, kneeHeightVar: 0.10 },
-    { band: '50-59', mid: 54.5, cadence: 111.15, strideLength: 1.25, kneeROM: 47.97, kneeHeightVar: 0.09 },
-    { band: '60-69', mid: 64.5, cadence: 107.56, strideLength: 1.19, kneeROM: 47.75, kneeHeightVar: 0.08 },
-    { band: '70+', mid: 77, cadence: 102.04, strideLength: 1.05, kneeROM: 46.38, kneeHeightVar: 0.11 }
+    { band: '20-29', mid: 24.5, cadence: 107.43, strideLength: 1.32, kneeROM: 50.66, kneeHeightVar: 0.10, spineLean: 0,   headOffset: 0,   smoothness: 0 },
+    { band: '30-39', mid: 34.5, cadence: 107.87, strideLength: 1.29, kneeROM: 50.33, kneeHeightVar: 0.10, spineLean: 0.5, headOffset: 0.4, smoothness: 3 },
+    { band: '40-49', mid: 44.5, cadence: 112.37, strideLength: 1.27, kneeROM: 50.53, kneeHeightVar: 0.10, spineLean: 1.0, headOffset: 0.9, smoothness: 7 },
+    { band: '50-59', mid: 54.5, cadence: 111.15, strideLength: 1.25, kneeROM: 47.97, kneeHeightVar: 0.09, spineLean: 1.8, headOffset: 1.5, smoothness: 12 },
+    { band: '60-69', mid: 64.5, cadence: 107.56, strideLength: 1.19, kneeROM: 47.75, kneeHeightVar: 0.08, spineLean: 2.8, headOffset: 2.3, smoothness: 18 },
+    { band: '70+', mid: 77, cadence: 102.04, strideLength: 1.05, kneeROM: 46.38, kneeHeightVar: 0.11, spineLean: 4.0, headOffset: 3.3, smoothness: 26 }
   ];
   let referenceSource = 'built-in default', referenceLoadedAt = null;
 
@@ -531,7 +591,10 @@ function start() {
       query = activeId ? query.eq('version_id', activeId) : query.is('version_id', null);
       const { data, error } = await query;
       if (!error && data && data.length) {
-        referenceData = data.map(r => ({ band: r.band, mid: +r.mid, cadence: +r.cadence, strideLength: +r.stride_length, kneeROM: +r.knee_rom, kneeHeightVar: +r.knee_height_var }));
+        referenceData = data.map(r => ({
+          band: r.band, mid: +r.mid, cadence: +r.cadence, strideLength: +r.stride_length, kneeROM: +r.knee_rom, kneeHeightVar: +r.knee_height_var,
+          spineLean: r.spine_lean != null ? +r.spine_lean : null, headOffset: r.head_offset != null ? +r.head_offset : null, smoothness: r.smoothness != null ? +r.smoothness : null
+        }));
         referenceSource = 'Supabase'; referenceLoadedAt = new Date();
       }
     } catch (e) { /* keep whatever referenceData currently holds, including the hardcoded fallback */ }
@@ -553,10 +616,39 @@ function start() {
       clearanceAge: c.footClearance.calibrated ? matchAge(c.footClearance.clearanceCm / 100, 'kneeHeightVar') : null,
       trunkAge: null // not scored — source trunk data is in degrees from body sensors, not comparable to this app's screen-based normalized trunk measurement
     };
+    const keyMap = { cadenceAge: 'cadence', strideAge: 'stride', kneeAge: 'knee', clearanceAge: 'clearance' };
     const used = ['cadenceAge', 'strideAge', 'kneeAge', 'clearanceAge'].filter(k => out[k] != null);
-    out.totalScore = used.length ? +(used.reduce((s, k) => s + out[k], 0) / used.length).toFixed(1) : null;
+    // Weighted average using the owner-configurable weights (default: equal weight = 1 each,
+    // which reproduces the original plain average exactly).
+    const totalWeight = used.reduce((s, k) => s + (gaitWeights[keyMap[k]] ?? 1), 0);
+    out.totalScore = (used.length && totalWeight > 0)
+      ? +(used.reduce((s, k) => s + out[k] * (gaitWeights[keyMap[k]] ?? 1), 0) / totalWeight).toFixed(1)
+      : null;
     out.categoriesUsed = used.length;
+    out.weightsApplied = used.map(k => ({ metric: keyMap[k], weight: gaitWeights[keyMap[k]] ?? 1 }));
+
+    // Illustrative-only trunk ages: an App estimate curve (see referenceData comment above),
+    // not a validated measurement. Deliberately kept OUT of totalScore/categoriesUsed/weights
+    // per owner's decision -- shown separately as a directional, test-only indicator.
+    out.spineLeanAge = matchAge(c.trunk.spineLeanPct != null ? Math.abs(c.trunk.spineLeanPct) : null, 'spineLean');
+    out.headOffsetAge = matchAge(c.trunk.headOffsetPct != null ? Math.abs(c.trunk.headOffsetPct) : null, 'headOffset');
+    out.smoothnessAge = matchAge(c.trunk.smoothnessVariabilityPct, 'smoothness');
     return out;
+  }
+
+  // Owner-configurable weights for the final weighted gait-age score. Defaults to equal
+  // weight (1) for every scorable category, which reproduces a plain average until the
+  // owner changes something in Settings -> Calculation weights.
+  let gaitWeights = { cadence: 1, stride: 1, knee: 1, clearance: 1 };
+  const WEIGHT_LABELS = { cadence: 'Walking rhythm & cadence', stride: 'Stride length vs. height', knee: 'Knee flexion & hip extension', clearance: 'Foot clearance & gait-cycle timing' };
+
+  async function loadWeights() {
+    try {
+      const { data, error } = await sb.from('gait_weights').select('*');
+      if (!error && data && data.length) {
+        data.forEach(r => { if (r.metric_key in gaitWeights) gaitWeights[r.metric_key] = +r.weight; });
+      }
+    } catch (e) { /* keep defaults */ }
   }
 
   // Guesses side-on vs. facing-the-camera from the pose data itself: a true side-on view has
@@ -795,6 +887,7 @@ function start() {
     if (!ok.length) { el.innerHTML = '<div class="err">No pose detected. Use a video where the full body is clearly visible.</div>'; return { gait: null, age: null }; }
     const heightCm = item && item.subject_height_cm || null, camView = item && item.camera_view || null;
     const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
+    const cmp = compareToReference(c);
     const row = (label, val, unit) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span class="dim">${label}</span><span>${val ?? '—'}${val != null ? ' ' + unit : ''}</span></div>`;
     const viewLabel = c.view.manual
       ? c.view.manual + ' (you selected this)'
@@ -828,16 +921,23 @@ function start() {
         ${row('Lateral trunk sway', c.trunk.swayNormalized, '(normalized)')}
         ${row('Movement smoothness (lower = smoother)', c.trunk.smoothnessVariabilityPct, '%')}
         <div class="dim trunkPct" style="font-size:11px;margin-top:6px">Comparing to your own history…</div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+          <b style="font-size:12px">Trunk age estimate (illustrative, test only)</b>
+          ${row('From spine lean', cmp.spineLeanAge, 'yrs')}
+          ${row('From head offset', cmp.headOffsetAge, 'yrs')}
+          ${row('From movement smoothness', cmp.smoothnessAge, 'yrs')}
+          <div class="dim" style="font-size:11px;margin-top:4px">Not a citation of a specific study's measured values — an app-estimated curve anchored at a "perfect" score around age 25, degrading in the general direction published postural-control/smoothness aging research reports. Source: App algorithm, direction informed by published aging literature. Kept separate from the total gait age score below and not affected by the calculation weights.</div>
+        </div>
       </div>`;
-    const cmp = compareToReference(c);
     html += `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px"><b>Reference-based gait age (test)</b>
       <div class="dim" style="font-size:11px;margin-top:2px">Nearest-matching age band vs. a published healthy-adult gait study (decade bands, 20s\u201370+), per category:</div>
       ${row('From cadence', cmp.cadenceAge, 'yrs')}
       ${row('From stride length', cmp.strideAge, 'yrs')}
       ${row('From knee range of motion', cmp.kneeAge, 'yrs')}
       ${row('From foot clearance (low confidence)', cmp.clearanceAge, 'yrs')}
-      <div class="dim" style="font-size:11px;margin-top:2px">Trunk not scored \u2014 this app measures trunk sway as normalized camera movement; the reference study measured it in degrees with body sensors, so the two aren\u2019t directly comparable.</div>
-      <div style="margin-top:6px"><b>Total gait age score: ${cmp.totalScore ?? '\u2014'}${cmp.totalScore != null ? ' yrs' : ''} (equal-weighted across ${cmp.categoriesUsed} of 4 scorable categories)</b></div>
+      <div class="dim" style="font-size:11px;margin-top:2px">Trunk not included here \u2014 see "Trunk age estimate" above, kept separate since it's an illustrative app estimate, not a direct study citation like the categories above.</div>
+      <div style="margin-top:6px"><b>Total gait age score: ${cmp.totalScore ?? '\u2014'}${cmp.totalScore != null ? ' yrs' : ''} (weighted across ${cmp.categoriesUsed} of 4 scorable categories)</b></div>
+      ${cmp.weightsApplied && cmp.weightsApplied.length ? '<div class="dim" style="font-size:11px;margin-top:2px">Weights used: ' + cmp.weightsApplied.map(w => esc(WEIGHT_LABELS[w.metric]) + ' \u00d7' + w.weight).join(', ') + '</div>' : ''}
       <div class="dim" style="font-size:11px;margin-top:4px">Experimental test only. Matched against one published sample, not a clinical or diagnostic tool, and not validated against this app\u2019s own camera-based measurement method.</div>
     </div>`;
     html += `<div style="margin-top:14px"><button class="aiBtn" style="width:100%">Get AI assessment</button>
