@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -160,16 +160,19 @@ function start() {
     const { data: rows, error } = await sb.from('gait_history').select('*').order('created_at', { ascending: false }).limit(50);
     if (error) { box.innerHTML = '<div class="dim" style="font-size:12px">' + esc(error.message) + '</div>'; return; }
     if (!rows.length) { box.innerHTML = '<div class="dim" style="font-size:12px">No gait estimates saved yet.</div>'; return; }
-    box.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:12px;color:var(--muted)">
-      <tr><th style="text-align:left;padding:4px 8px 4px 0">Date</th><th style="text-align:left;padding:4px 8px 4px 0">Cadence</th><th style="text-align:left;padding:4px 8px 4px 0">Variability</th><th style="text-align:left;padding:4px 8px 4px 0">Knee ROM</th><th style="text-align:left;padding:4px 8px 4px 0;color:var(--accent)">Est. age</th></tr>
+    box.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;color:var(--muted);white-space:nowrap">
+      <tr><th style="text-align:left;padding:4px 8px 4px 0">Date</th><th style="text-align:left;padding:4px 8px 4px 0">Cadence</th><th style="text-align:left;padding:4px 8px 4px 0">Variability</th><th style="text-align:left;padding:4px 8px 4px 0">Stride</th><th style="text-align:left;padding:4px 8px 4px 0">Knee ROM</th><th style="text-align:left;padding:4px 8px 4px 0">Hip ROM</th><th style="text-align:left;padding:4px 8px 4px 0">Clearance</th></tr>
       ${rows.map(r => `<tr>
         <td style="padding:4px 8px 4px 0">${new Date(r.created_at).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'2-digit'})}</td>
         <td style="padding:4px 8px 4px 0">${r.cadence ?? '—'}</td>
         <td style="padding:4px 8px 4px 0">${r.step_cv ?? '—'}%</td>
+        <td style="padding:4px 8px 4px 0">${r.stride_length_m != null ? r.stride_length_m + 'm' + (r.stride_reliable ? '' : '*') : '—'}</td>
         <td style="padding:4px 8px 4px 0">${r.knee_rom ?? '—'}&deg;</td>
-        <td style="padding:4px 8px 4px 0;color:var(--accent)">${r.age_low != null ? r.age_low + '\u2013' + r.age_high : '—'}</td>
+        <td style="padding:4px 8px 4px 0">${r.hip_rom ?? '—'}&deg;</td>
+        <td style="padding:4px 8px 4px 0">${r.foot_clearance_cm ?? '—'}</td>
       </tr>`).join('')}
-    </table>`;
+    </table></div>
+    <div class="dim" style="font-size:11px;margin-top:4px">* stride length not reliable for this entry (needs height + side-on camera view)</div>`;
   }
 
   async function loadGrid() {
@@ -252,7 +255,9 @@ function start() {
         leftElbow: round1(angle3(lSh, lEl, lWr)),
         rightElbow: round1(angle3(rSh, rEl, rWr)),
         leftKnee: round1(angle3(lHip, lKn, lAn)),
-        rightKnee: round1(angle3(rHip, rKn, rAn))
+        rightKnee: round1(angle3(rHip, rKn, rAn)),
+        leftHip: round1(angle3(lSh, lHip, lKn)),
+        rightHip: round1(angle3(rSh, rHip, rKn))
       },
       symmetry: {
         shoulderHeightDiff: +(Math.abs(lSh.y - rSh.y) * 100).toFixed(1),
@@ -320,6 +325,64 @@ function start() {
     if (older > younger) return 'This clip\u2019s rhythm skews toward patterns more common in older adults (slower cadence, more step-to-step variability, and/or reduced knee range of motion) in published gait research.';
     if (younger > older) return 'This clip\u2019s rhythm skews toward patterns more common in younger/midlife adults (brisker, steadier cadence and fuller knee range of motion) in published gait research.';
     return 'This clip\u2019s rhythm sits in a mixed range, without a clear lean toward younger or older walking patterns.';
+  }
+
+  function avg(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+
+  // Computes the 5 user-defined measurement categories from the same raw per-frame landmark data.
+  function computeFiveCategories(rows, heightCm, vidW, vidH, cameraView) {
+    const ok = rows.filter(r => r.m && r.lay !== undefined);
+    const t = ok.map(r => r.t), lay = ok.map(r => r.lay), ray = ok.map(r => r.ray);
+    const lax = ok.map(r => r.lax), rax = ok.map(r => r.rax);
+    const minimaIdx = (arr) => { const o = []; for (let i = 1; i < arr.length - 1; i++) if (arr[i] < arr[i - 1] && arr[i] < arr[i + 1]) o.push(i); return o; };
+    const lIdx = minimaIdx(lay), rIdx = minimaIdx(ray);
+    const combinedT = [...lIdx.map(i => t[i]), ...rIdx.map(i => t[i])].sort((a, b) => a - b);
+    const combinedInt = combinedT.slice(1).map((v, i) => v - combinedT[i]);
+    const meanCombined = combinedInt.length ? avg(combinedInt) : null;
+    const cadence = meanCombined ? +(60 / meanCombined).toFixed(1) : null;
+    const stepTimeCV = combinedInt.length > 1 ? +(stdev(combinedInt) / meanCombined * 100).toFixed(1) : null;
+
+    const cycleOf = (idx) => { const o = []; for (let i = 1; i < idx.length; i++) o.push(t[idx[i]] - t[idx[i - 1]]); return o; };
+    const lCyc = cycleOf(lIdx), rCyc = cycleOf(rIdx);
+    const gaitCycleDurationSec = (lCyc.length || rCyc.length) ? +(((lCyc.length ? avg(lCyc) : avg(rCyc)) + (rCyc.length ? avg(rCyc) : avg(lCyc))) / 2).toFixed(2) : null;
+
+    let mPerPx = null;
+    if (heightCm && vidW && vidH) {
+      const h = ok.map(r => r.bodyPxH).filter(v => v > 0);
+      if (h.length) mPerPx = (heightCm / 100) / avg(h);
+    }
+
+    const strideOf = (idx, ax) => { const o = []; for (let i = 1; i < idx.length; i++) o.push(Math.abs(ax[idx[i]] - ax[idx[i - 1]])); return o; };
+    const allStrides = [...strideOf(lIdx, lax), ...strideOf(rIdx, rax)];
+    let strideLengthM = null, strideRatio = null;
+    if (allStrides.length && mPerPx) { strideLengthM = +(avg(allStrides) * vidW * mPerPx).toFixed(2); strideRatio = +(strideLengthM / (heightCm / 100)).toFixed(2); }
+    const strideReason = !mPerPx ? 'no height provided' : (cameraView !== 'side' ? 'camera view is not side-on, so forward stride distance can\u2019t be measured reliably' : (combinedInt.length < 2 ? 'not enough steps detected' : 'ok'));
+    const strideReliable = !!(strideLengthM && cameraView === 'side' && combinedInt.length >= 2);
+
+    const lKnees = ok.map(r => r.m.form.leftKnee).filter(v => v != null), rKnees = ok.map(r => r.m.form.rightKnee).filter(v => v != null);
+    const lHips = ok.map(r => r.m.form.leftHip).filter(v => v != null), rHips = ok.map(r => r.m.form.rightHip).filter(v => v != null);
+    const kneeROM = (lKnees.length && rKnees.length) ? +(Math.max(...lKnees, ...rKnees) - Math.min(...lKnees, ...rKnees)).toFixed(1) : null;
+    const hipROM = (lHips.length && rHips.length) ? +(Math.max(...lHips, ...rHips) - Math.min(...lHips, ...rHips)).toFixed(1) : null;
+
+    const lClear = lay.length ? Math.max(...lay) - Math.min(...lay) : null, rClear = ray.length ? Math.max(...ray) - Math.min(...ray) : null;
+    const clearNorm = (lClear != null && rClear != null) ? (lClear + rClear) / 2 : (lClear ?? rClear);
+    const clearanceCm = (clearNorm != null && mPerPx) ? +(clearNorm * vidH * mPerPx * 100).toFixed(1) : null;
+
+    const trunkXs = ok.map(r => r.trunkX);
+    const sway = trunkXs.length ? +(Math.max(...trunkXs) - Math.min(...trunkXs)).toFixed(3) : null;
+    const deltas = trunkXs.slice(1).map((v, i) => Math.abs(v - trunkXs[i]));
+    const smoothnessCV = deltas.length > 1 ? +(stdev(deltas) / (avg(deltas) || 1e-6) * 100).toFixed(1) : null;
+
+    return {
+      rhythm: { cadence, stepTimeVariabilityPct: stepTimeCV, gaitCycleDurationSec, stepsDetected: combinedT.length },
+      stride: { strideLengthM, strideLengthToHeightRatio: strideRatio, reliable: strideReliable, reason: strideReason },
+      kneeHip: {
+        avgLeftKnee: lKnees.length ? +avg(lKnees).toFixed(1) : null, avgRightKnee: rKnees.length ? +avg(rKnees).toFixed(1) : null, kneeROM,
+        avgLeftHip: lHips.length ? +avg(lHips).toFixed(1) : null, avgRightHip: rHips.length ? +avg(rHips).toFixed(1) : null, hipROM
+      },
+      footClearance: { clearanceCm, calibrated: !!mPerPx },
+      trunk: { spineLeanPct: avgNum(rows, 'posture', 'spineLean'), headOffsetPct: avgNum(rows, 'posture', 'headOffset'), swayNormalized: sway, smoothnessVariabilityPct: smoothnessCV }
+    };
   }
 
   // Derives the six requested gait metrics + quality fields from raw per-frame landmark data.
@@ -391,17 +454,20 @@ function start() {
   // nothing here is invented; every field traces back to metricsFromLandmarks() / gaitMetrics().
   function buildAssessmentPayload(rows, vid, item) {
     const heightCm = item && item.subject_height_cm || null;
+    const camView = (item && item.camera_view) || null;
     const eg = computeExtendedGait(rows, heightCm, vid.videoWidth, vid.videoHeight);
+    const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
     const notes = [];
     if (!item || item.subject_age == null) notes.push('userAge was not provided by the uploader; it is self-reported, not derived from the video.');
     if (!item || !item.camera_view) notes.push('cameraView was not selected by the uploader; it cannot be reliably auto-detected from pose landmarks.');
-    if (!eg.calibrated) notes.push('No height was provided, so stepWidthVariability and walkingSpeedMps are normalized (unitless) screen-space values, not real-world meters/m/s.');
+    if (!eg.calibrated) notes.push('No height was provided, so stepWidthVariability, walkingSpeedMps and footClearanceCm are normalized (unitless) screen-space values, not real-world units.');
     if (eg.validGaitCycles < 2) notes.push('Very few gait cycles were detected in this clip; metrics derived from step timing may be unreliable.');
+    if (!c.stride.reliable) notes.push('strideLengthM/strideLengthToHeightRatio are not reliable here: ' + c.stride.reason + '.');
 
     return {
       userAge: (item && item.subject_age) ?? null,
       videoDurationSeconds: vid.duration ? +vid.duration.toFixed(1) : null,
-      cameraView: (item && item.camera_view) || 'unknown',
+      cameraView: camView || 'unknown',
       poseQuality: qualityLabel(eg.validFrameRatio, eg.landmarkVisibility),
       metrics: {
         cadenceStepsPerMin: { value: eg.cadence, unit: 'steps/min', method: 'detected foot events' },
@@ -409,7 +475,16 @@ function start() {
         trunkSway: { value: eg.trunkSway, unit: 'normalized displacement', method: 'lateral trunk movement across gait cycles' },
         armSwingAsymmetry: { value: eg.armSwingAsymmetry, unit: 'ratio', method: 'left-right arm swing amplitude difference' },
         stepWidthVariability: { value: eg.stepWidthVariability, unit: eg.stepWidthUnit === 'meters' ? 'meters' : 'normalized', method: 'variability of lateral foot placement' },
-        walkingSpeedMps: { value: eg.walkingSpeedMps, unit: eg.speedUnit, method: eg.calibrated ? 'calibrated displacement over time' : 'uncalibrated displacement over time (no height provided)' }
+        walkingSpeedMps: { value: eg.walkingSpeedMps, unit: eg.speedUnit, method: eg.calibrated ? 'calibrated displacement over time' : 'uncalibrated displacement over time (no height provided)' },
+        strideLengthM: { value: c.stride.strideLengthM, unit: c.stride.strideLengthM != null ? 'meters' : 'n/a', method: 'distance between consecutive same-foot ground contacts, reliable only for side-on view with height provided', reliable: c.stride.reliable },
+        strideLengthToHeightRatio: { value: c.stride.strideLengthToHeightRatio, unit: 'ratio', method: 'stride length divided by subject height', reliable: c.stride.reliable },
+        gaitCycleDurationSec: { value: c.rhythm.gaitCycleDurationSec, unit: 'seconds', method: 'average time between consecutive same-foot ground contacts' },
+        kneeAngleAvgDeg: { value: { left: c.kneeHip.avgLeftKnee, right: c.kneeHip.avgRightKnee }, unit: 'degrees', method: 'angle at knee between hip-knee-ankle, averaged across sampled frames' },
+        kneeRangeOfMotionDeg: { value: c.kneeHip.kneeROM, unit: 'degrees', method: 'max minus min knee angle across sampled frames' },
+        hipAngleAvgDeg: { value: { left: c.kneeHip.avgLeftHip, right: c.kneeHip.avgRightHip }, unit: 'degrees', method: 'angle at hip between shoulder-hip-knee, averaged across sampled frames' },
+        hipRangeOfMotionDeg: { value: c.kneeHip.hipROM, unit: 'degrees', method: 'max minus min hip angle across sampled frames' },
+        footClearanceCm: { value: c.footClearance.clearanceCm, unit: c.footClearance.calibrated ? 'cm' : 'normalized', method: 'vertical amplitude of ankle height during swing phase' },
+        trunkSmoothness: { value: c.trunk.smoothnessVariabilityPct, unit: '% (lower = smoother)', method: 'coefficient of variation of frame-to-frame trunk displacement' }
       },
       quality: { validFrameRatio: eg.validFrameRatio, validGaitCycles: eg.validGaitCycles, landmarkVisibility: eg.landmarkVisibility },
       notes
@@ -454,35 +529,47 @@ function start() {
     }
   }
 
+  // Only shows the fields that match the Edge Function's schema. Full per-frame landmark
+  // data is still saved to videos.report (see analyze()) for later recompute — just not displayed.
   function showReport(el, rows, vid, item) {
     const ok = rows.filter(r => r.m);
-    if (!ok.length) { el.innerHTML = '<div class="err">No pose detected. Use a video where the full body is clearly visible.</div>'; return; }
-    let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>`;
-    if (SHOW_POSTURE) html += `<div style="margin-top:10px"><b>General posture / alignment</b>
-      <div class="dim">avg shoulder tilt ${avgOf(rows,'posture','shoulderTilt')}&deg; &middot; avg hip tilt ${avgOf(rows,'posture','hipTilt')}&deg; &middot; avg head offset ${avgOf(rows,'posture','headOffset')}% &middot; avg spine lean ${avgOf(rows,'posture','spineLean')}%</div>
-      ${table(rows, 'posture', [{key:'shoulderTilt',label:'shoulder',unit:'°'},{key:'hipTilt',label:'hip',unit:'°'},{key:'headOffset',label:'head',unit:'%'},{key:'spineLean',label:'spine',unit:'%'}])}</div>`;
-    if (SHOW_FORM) html += `<div style="margin-top:10px"><b>Exercise form (joint angles)</b>
-      <div class="dim">avg L/R elbow ${avgOf(rows,'form','leftElbow')}&deg; / ${avgOf(rows,'form','rightElbow')}&deg; &middot; avg L/R knee ${avgOf(rows,'form','leftKnee')}&deg; / ${avgOf(rows,'form','rightKnee')}&deg;</div>
-      ${table(rows, 'form', [{key:'leftElbow',label:'L elbow',unit:'°'},{key:'rightElbow',label:'R elbow',unit:'°'},{key:'leftKnee',label:'L knee',unit:'°'},{key:'rightKnee',label:'R knee',unit:'°'}])}</div>`;
-    if (SHOW_SYMMETRY) html += `<div style="margin-top:10px"><b>Movement / symmetry</b>
-      <div class="dim">avg shoulder height diff ${avgOf(rows,'symmetry','shoulderHeightDiff')}% &middot; avg hip height diff ${avgOf(rows,'symmetry','hipHeightDiff')}% &middot; avg wrist height diff ${avgOf(rows,'symmetry','wristHeightDiff')}%</div>
-      ${table(rows, 'symmetry', [{key:'shoulderHeightDiff',label:'shoulders',unit:'%'},{key:'hipHeightDiff',label:'hips',unit:'%'},{key:'wristHeightDiff',label:'wrists',unit:'%'}])}</div>`;
-    if (SHOW_GAIT) {
-      const g = gaitMetrics(rows);
-      const age = gaitAgeEstimate(g);
-      html += `<div style="margin-top:10px"><b>Gait rhythm &amp; age-leaning (experimental)</b>
-        <div class="dim">cadence ${g.cadence ?? '—'} steps/min &middot; step-time variability ${g.cv ?? '—'}% &middot; knee range of motion ${g.kneeROM ?? '—'}&deg; &middot; ${g.steps} step-like cycles detected</div>
-        ${age ? `<div style="margin-top:6px"><b>Estimated gait age: ${age.low}&ndash;${age.high} (midpoint ${age.mid})</b></div>` : ''}
-        <div class="dim" style="margin-top:6px">${gaitBand(g)}</div>
-        <div class="dim" style="margin-top:6px;font-size:11px">Not a medical or validated measurement — a rough heuristic based on published population trends in walking speed, step consistency and knee motion, with a deliberately wide range. Accuracy depends heavily on a clear, full-body, side-on walking shot.</div>
+    if (!ok.length) { el.innerHTML = '<div class="err">No pose detected. Use a video where the full body is clearly visible.</div>'; return { gait: null, age: null }; }
+    const heightCm = item && item.subject_height_cm || null, camView = item && item.camera_view || null;
+    const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
+    const row = (label, val, unit) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span class="dim">${label}</span><span>${val ?? '—'}${val != null ? ' ' + unit : ''}</span></div>`;
+    let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>
+      <div style="margin-top:10px"><b>1. Walking rhythm &amp; cadence</b>
+        ${row('Cadence', c.rhythm.cadence, 'steps/min')}
+        ${row('Step-time variability', c.rhythm.stepTimeVariabilityPct, '%')}
+        ${row('Gait cycle duration', c.rhythm.gaitCycleDurationSec, 's')}
+      </div>
+      <div style="margin-top:10px"><b>2. Stride length vs. height</b>
+        ${row('Stride length', c.stride.strideLengthM, 'm')}
+        ${row('Stride / height ratio', c.stride.strideLengthToHeightRatio, '')}
+        <div class="dim" style="font-size:11px;margin-top:2px">${c.stride.reliable ? 'Reliable — height provided and a side-on camera view.' : 'Not reliable: ' + c.stride.reason + '.'}</div>
+      </div>
+      <div style="margin-top:10px"><b>3. Knee flexion &amp; hip extension</b>
+        ${row('Avg knee angle (L / R)', (c.kneeHip.avgLeftKnee ?? '—') + ' / ' + (c.kneeHip.avgRightKnee ?? '—'), '&deg;')}
+        ${row('Knee range of motion', c.kneeHip.kneeROM, '&deg;')}
+        ${row('Avg hip angle (L / R)', (c.kneeHip.avgLeftHip ?? '—') + ' / ' + (c.kneeHip.avgRightHip ?? '—'), '&deg;')}
+        ${row('Hip range of motion', c.kneeHip.hipROM, '&deg;')}
+      </div>
+      <div style="margin-top:10px"><b>4. Foot clearance &amp; gait-cycle timing</b>
+        ${row('Foot clearance', c.footClearance.clearanceCm, c.footClearance.calibrated ? 'cm' : '(normalized, no height given)')}
+        ${row('Gait cycle duration', c.rhythm.gaitCycleDurationSec, 's')}
+      </div>
+      <div style="margin-top:10px"><b>5. Trunk posture &amp; movement smoothness</b>
+        ${row('Spine lean', c.trunk.spineLeanPct, '%')}
+        ${row('Head offset', c.trunk.headOffsetPct, '%')}
+        ${row('Lateral trunk sway', c.trunk.swayNormalized, '(normalized)')}
+        ${row('Movement smoothness (lower = smoother)', c.trunk.smoothnessVariabilityPct, '%')}
       </div>`;
-    }
     html += `<div style="margin-top:14px"><button class="aiBtn" style="width:100%">Get AI assessment</button>
       <div class="aiBox" style="display:none;margin-top:8px"></div></div>`;
     el.innerHTML = html;
     const aiBtn = el.querySelector('.aiBtn'), aiBox = el.querySelector('.aiBox');
     if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, vid, item);
-    return { gait: SHOW_GAIT ? gaitMetrics(rows) : null, age: SHOW_GAIT ? gaitAgeEstimate(gaitMetrics(rows)) : null };
+    return { gait: gaitMetrics(rows), age: gaitAgeEstimate(gaitMetrics(rows)) };
   }
 
   async function analyze(vid, rep, item) {
@@ -514,13 +601,24 @@ function start() {
       }
     } catch (e) { rep.innerHTML = '<div class="err">Analysis failed: ' + esc(String((e && e.message) || e)) + '</div>'; return; }
     vid.currentTime = back;
-    const { gait, age } = showReport(rep, rows, vid, item);
+    showReport(rep, rows, vid, item);
     await sb.from('videos').update({ report: rows }).eq('id', id);
-    if (gait && gait.cadence !== null) {
+
+    const heightCm = item.subject_height_cm || null, camView = item.camera_view || null;
+    const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
+    const legacyAge = gaitAgeEstimate(gaitMetrics(rows)); // kept for continuity with earlier saved history rows
+    if (c.rhythm.cadence !== null) {
       await sb.from('gait_history').insert({
         video_id: id,
-        cadence: gait.cadence, step_cv: gait.cv, knee_rom: gait.kneeROM, steps_detected: gait.steps,
-        age_low: age ? age.low : null, age_high: age ? age.high : null, age_mid: age ? age.mid : null
+        cadence: c.rhythm.cadence, step_cv: c.rhythm.stepTimeVariabilityPct, steps_detected: c.rhythm.stepsDetected,
+        gait_cycle_duration_sec: c.rhythm.gaitCycleDurationSec,
+        stride_length_m: c.stride.strideLengthM, stride_length_ratio: c.stride.strideLengthToHeightRatio, stride_reliable: c.stride.reliable,
+        knee_rom: c.kneeHip.kneeROM, hip_rom: c.kneeHip.hipROM,
+        avg_left_knee: c.kneeHip.avgLeftKnee, avg_right_knee: c.kneeHip.avgRightKnee,
+        avg_left_hip: c.kneeHip.avgLeftHip, avg_right_hip: c.kneeHip.avgRightHip,
+        foot_clearance_cm: c.footClearance.clearanceCm,
+        trunk_sway: c.trunk.swayNormalized, trunk_smoothness: c.trunk.smoothnessVariabilityPct,
+        age_low: legacyAge ? legacyAge.low : null, age_high: legacyAge ? legacyAge.high : null, age_mid: legacyAge ? legacyAge.mid : null
       });
       loadHistory();
     }
