@@ -53,8 +53,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
+// The only account allowed to refresh the reference table from the app. Everyone can still VIEW it.
+const OWNER_EMAIL = 'PASTE_YOUR_LOGIN_EMAIL_HERE';
 // =================================================
 
 const app = document.getElementById('app');
@@ -125,9 +127,9 @@ function start() {
       </div>
       <div class="msg" id="upmsg"></div></div>
       <div class="grid" id="grid"></div>
-      <div style="margin-top:28px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px">
-        <span id="refStatus" class="dim" style="font-size:11px">Reference table: loading…</span>
-        <button class="text" id="refreshRef" style="border:1px solid var(--border);border-radius:8px">Refresh reference data</button>
+      <div style="margin-top:28px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+        <button class="text" id="settingsToggle" style="border:1px solid var(--border);border-radius:8px">&#9881; Settings</button>
+        <div id="settingsPanel" style="display:none;margin-top:12px;font-size:12px"></div>
       </div>
       <div style="margin-top:28px"><b>Gait age history</b>
         <div class="dim" style="font-size:12px;margin:4px 0 10px">Every time you run Analyze pose on a walking clip, the parameters and estimate are saved here so you can compare over time.</div>
@@ -157,11 +159,44 @@ function start() {
     loadGrid();
     loadHistory();
     loadReferenceData();
-    document.getElementById('refreshRef').onclick = async (e) => {
+    const panel = document.getElementById('settingsPanel');
+    document.getElementById('settingsToggle').onclick = () => {
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      if (panel.style.display === 'block') renderSettingsPanel(panel);
+    };
+  }
+
+  function renderSettingsPanel(panel) {
+    const isOwner = user && user.email === OWNER_EMAIL;
+    panel.innerHTML = `
+      <div id="refStatus" class="dim" style="font-size:11px">Reference table: loading…</div>
+      ${isOwner ? '<button class="text" id="refreshRef" style="border:1px solid var(--border);border-radius:8px;margin-top:8px">Refresh reference data</button>' : '<div class="dim" style="font-size:11px;margin-top:6px">Only the app owner can refresh the reference table. Everyone can view its source below.</div>'}
+      <div style="margin-top:14px"><button class="text" id="srcToggle" style="border:1px solid var(--border);border-radius:8px">Source of reference</button>
+        <div id="srcBox" style="display:none;margin-top:10px"></div>
+      </div>`;
+    loadReferenceData();
+    if (isOwner) document.getElementById('refreshRef').onclick = async (e) => {
       e.target.disabled = true; e.target.textContent = 'Refreshing…';
       await loadReferenceData();
       e.target.disabled = false; e.target.textContent = 'Refresh reference data';
     };
+    document.getElementById('srcToggle').onclick = () => {
+      const box = document.getElementById('srcBox');
+      if (box.style.display === 'none') { box.style.display = 'block'; renderSourceBox(box); }
+      else box.style.display = 'none';
+    };
+  }
+
+  function renderSourceBox(box) {
+    box.innerHTML = `<div class="dim" style="line-height:1.6">
+      <b>Source:</b> PMC6660692 (PubMed Central) — a published motion-capture study of healthy adults, reporting mean gait measurements grouped by age decade. Read-only reference data, not editable from the app.<br>
+      <b>Used for scoring:</b> cadence, stride length, knee flexion-extension range, and knee-height variation (used as an approximate stand-in for foot clearance).<br>
+      <b>Not used for scoring</b> (shown here for context only — this app measures trunk motion differently from how the source study measured it, so a numeric comparison isn't valid): the source also reports <i>trunk tilt</i> (forward/back lean, degrees), <i>trunk obliquity</i> (side-to-side sway, degrees), and <i>trunk rotation</i> (degrees), each by age decade.
+      <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px">
+        <tr><th style="text-align:left;padding:3px 6px 3px 0">Band</th><th style="text-align:left;padding:3px 6px 3px 0">Cadence</th><th style="text-align:left;padding:3px 6px 3px 0">Stride (m)</th><th style="text-align:left;padding:3px 6px 3px 0">Knee ROM</th><th style="text-align:left;padding:3px 6px 3px 0">Knee ht. var.</th></tr>
+        ${referenceData.map(b => `<tr><td style="padding:3px 6px 3px 0">${b.band}</td><td style="padding:3px 6px 3px 0">${b.cadence}</td><td style="padding:3px 6px 3px 0">${b.strideLength}</td><td style="padding:3px 6px 3px 0">${b.kneeROM}</td><td style="padding:3px 6px 3px 0">${b.kneeHeightVar}</td></tr>`).join('')}
+      </table>
+    </div>`;
   }
 
   async function loadHistory() {
@@ -338,6 +373,24 @@ function start() {
   }
 
   function avg(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+  function percentileRank(value, arr) {
+    if (!arr.length) return null;
+    const count = arr.filter(v => v <= value).length;
+    return Math.round((count / arr.length) * 100);
+  }
+  // Compares this video's trunk numbers to this same account's own history (RLS already
+  // scopes gait_history to the logged-in user) — a within-person trend, not an age mapping.
+  async function loadTrunkPercentile(rep, sway, smoothness) {
+    const el = rep.querySelector('.trunkPct');
+    if (!el) return;
+    const { data, error } = await sb.from('gait_history').select('trunk_sway, trunk_smoothness');
+    const swayVals = (data || []).map(d => d.trunk_sway).filter(v => v != null);
+    const smoothVals = (data || []).map(d => d.trunk_smoothness).filter(v => v != null);
+    if (error || swayVals.length < 2) { el.textContent = 'Not enough of your own analyzed videos yet to compare (need at least 2).'; return; }
+    const swayPct = sway != null ? percentileRank(sway, swayVals) : null;
+    const smoothPct = smoothness != null ? percentileRank(smoothness, smoothVals) : null;
+    el.innerHTML = `Vs. your own history (${swayVals.length} recordings): lateral sway is higher than ${swayPct ?? '—'}% of your past videos &middot; movement smoothness variability is higher than ${smoothPct ?? '—'}% of your past videos (lower % = smoother than usual).`;
+  }
 
   // Source: PMC6660692 (PubMed Central) — healthy-adult gait parameters by age decade,
   // motion-capture study. 10-19 band excluded (adolescent growth skews it for adult comparison).
@@ -425,7 +478,11 @@ function start() {
 
     const lClear = lay.length ? Math.max(...lay) - Math.min(...lay) : null, rClear = ray.length ? Math.max(...ray) - Math.min(...ray) : null;
     const clearNorm = (lClear != null && rClear != null) ? (lClear + rClear) / 2 : (lClear ?? rClear);
-    const clearanceCm = (clearNorm != null && mPerPx) ? +(clearNorm * vidH * mPerPx * 100).toFixed(1) : null;
+    let clearanceCm = null, clearanceCalibrated = false;
+    if (clearNorm != null) {
+      if (mPerPx) { clearanceCm = +(clearNorm * vidH * mPerPx * 100).toFixed(1); clearanceCalibrated = true; }
+      else clearanceCm = +clearNorm.toFixed(3); // normalized (0-1 of frame height) fallback, no height given
+    }
 
     const trunkXs = ok.map(r => r.trunkX);
     const sway = trunkXs.length ? +(Math.max(...trunkXs) - Math.min(...trunkXs)).toFixed(3) : null;
@@ -439,7 +496,7 @@ function start() {
         avgLeftKnee: lKnees.length ? +avg(lKnees).toFixed(1) : null, avgRightKnee: rKnees.length ? +avg(rKnees).toFixed(1) : null, kneeROM,
         avgLeftHip: lHips.length ? +avg(lHips).toFixed(1) : null, avgRightHip: rHips.length ? +avg(rHips).toFixed(1) : null, hipROM
       },
-      footClearance: { clearanceCm, calibrated: !!mPerPx },
+      footClearance: { clearanceCm, calibrated: clearanceCalibrated },
       trunk: { spineLeanPct: avgNum(rows, 'posture', 'spineLean'), headOffsetPct: avgNum(rows, 'posture', 'headOffset'), swayNormalized: sway, smoothnessVariabilityPct: smoothnessCV }
     };
   }
@@ -546,7 +603,12 @@ function start() {
         trunkSmoothness: { value: c.trunk.smoothnessVariabilityPct, unit: '% (lower = smoother)', method: 'coefficient of variation of frame-to-frame trunk displacement' }
       },
       quality: { validFrameRatio: eg.validFrameRatio, validGaitCycles: eg.validGaitCycles, landmarkVisibility: eg.landmarkVisibility },
-      notes
+      notes,
+      // Full per-frame MediaPipe output behind the summary metrics above, for the AI to read directly
+      // as a validation check on the computed numbers — not for commenting on video/recording quality.
+      rawFrames: rows.map(r => r.m ? { t: r.t, posture: r.m.posture, form: r.m.form, symmetry: r.m.symmetry } : { t: r.t, poseDetected: false }),
+      referenceComparison: compareToReference(c),
+      assessmentInstructions: 'Use rawFrames plus the summary metrics to independently sanity-check the gait age estimate in referenceComparison — this is a validation step, not an evaluation of video/recording quality. Your task is to assess the person\u2019s gait age and produce a 4-week plan of exercises/changes aimed at reducing (improving) their gait age score, grounded in which specific metrics are driving the current estimate.'
     };
   }
 
@@ -597,6 +659,7 @@ function start() {
     const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
     const row = (label, val, unit) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span class="dim">${label}</span><span>${val ?? '—'}${val != null ? ' ' + unit : ''}</span></div>`;
     let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>
+      <div class="dim" style="font-size:11px;margin-top:2px">On file for this video — height: ${heightCm ? heightCm + 'cm' : 'not provided'} &middot; camera view: ${camView || 'not set'}</div>
       <div style="margin-top:10px"><b>1. Walking rhythm &amp; cadence</b>
         ${row('Cadence', c.rhythm.cadence, 'steps/min')}
         ${row('Step-time variability', c.rhythm.stepTimeVariabilityPct, '%')}
@@ -614,7 +677,7 @@ function start() {
         ${row('Hip range of motion', c.kneeHip.hipROM, '&deg;')}
       </div>
       <div style="margin-top:10px"><b>4. Foot clearance &amp; gait-cycle timing</b>
-        ${row('Foot clearance', c.footClearance.clearanceCm, c.footClearance.calibrated ? 'cm' : '(normalized, no height given)')}
+        ${row('Foot clearance', c.footClearance.clearanceCm, c.footClearance.calibrated ? 'cm' : '(normalized — add height for cm)')}
         ${row('Gait cycle duration', c.rhythm.gaitCycleDurationSec, 's')}
       </div>
       <div style="margin-top:10px"><b>5. Trunk posture &amp; movement smoothness</b>
@@ -622,6 +685,7 @@ function start() {
         ${row('Head offset', c.trunk.headOffsetPct, '%')}
         ${row('Lateral trunk sway', c.trunk.swayNormalized, '(normalized)')}
         ${row('Movement smoothness (lower = smoother)', c.trunk.smoothnessVariabilityPct, '%')}
+        <div class="dim trunkPct" style="font-size:11px;margin-top:6px">Comparing to your own history…</div>
       </div>`;
     const cmp = compareToReference(c);
     html += `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px"><b>Reference-based gait age (test)</b>
@@ -639,6 +703,7 @@ function start() {
     el.innerHTML = html;
     const aiBtn = el.querySelector('.aiBtn'), aiBox = el.querySelector('.aiBox');
     if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, vid, item);
+    loadTrunkPercentile(el, c.trunk.swayNormalized, c.trunk.smoothnessVariabilityPct);
     return { gait: gaitMetrics(rows), age: gaitAgeEstimate(gaitMetrics(rows)) };
   }
 
