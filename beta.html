@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // The only account allowed to refresh the reference table from the app. Everyone can still VIEW it.
 const OWNER_EMAIL = 'sharonlixr@gmail.com';
 // =================================================
@@ -127,7 +127,7 @@ function start() {
           <input id="subAge" type="number" placeholder="Age" style="width:80px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
           <input id="subHeight" type="number" placeholder="Height (cm)" style="width:120px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
           <select id="subView" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:14px">
-            <option value="">Camera view (optional)</option>
+            <option value="">Camera view (auto-detected if left blank)</option>
             <option value="front">Front</option>
             <option value="side">Side</option>
             <option value="rear">Rear</option>
@@ -239,19 +239,35 @@ function start() {
   async function ensureDefaultVersion() {
     // First run: no versions table rows yet. Create one "default" version and attach
     // any existing unversioned gait_reference rows to it, so the dropdowns aren't empty.
-    const { data: vRow, error: vErr } = await sb.from('gait_reference_versions').insert({
+    // Deliberately does NOT chain .select().single() after insert -- that chain can fail
+    // on some RLS/grant setups even when the insert itself succeeds, which previously
+    // caused this whole function to bail out silently and leave the dropdown empty.
+    const { error: insErr } = await sb.from('gait_reference_versions').insert({
       label: 'PMC6660692 (default)',
       source_note: 'PubMed Central — published motion-capture study of healthy adults, mean gait measurements by age decade.',
       status: 'verified', is_active: true
-    }).select().single();
-    if (vErr || !vRow) return;
-    await sb.from('gait_reference').update({ version_id: vRow.id }).is('version_id', null);
+    });
+    if (insErr) {
+      console.error('ensureDefaultVersion insert failed:', insErr.message);
+      const detail = document.getElementById('sourceDetail');
+      if (detail) detail.textContent = 'Could not create a default reference version: ' + insErr.message;
+      return;
+    }
     await loadVersions();
+    const v = versionsCache.find(x => x.is_active);
+    if (v) await sb.from('gait_reference').update({ version_id: v.id }).is('version_id', null);
   }
 
   function populateVersionDropdowns() {
     const sourceSelect = document.getElementById('sourceSelect'), refreshSelect = document.getElementById('refreshSelect');
     if (!sourceSelect) return;
+    if (!versionsCache.length) {
+      sourceSelect.innerHTML = '<option value="">No reference versions found</option>';
+      refreshSelect.innerHTML = '<option value="">— history of checks / candidates —</option>';
+      const detail = document.getElementById('sourceDetail');
+      if (detail && !detail.textContent) detail.textContent = 'No reference dataset is set up yet. Reopen Settings, or ask the owner to check Supabase.';
+      return;
+    }
     sourceSelect.innerHTML = versionsCache.map(v => `<option value="${v.id}" ${v.is_active ? 'selected' : ''}>${esc(v.label)}${v.is_active ? ' (active)' : ''}</option>`).join('');
     refreshSelect.innerHTML = '<option value="">— history of checks / candidates —</option>' + versionsCache.map(v => `<option value="${v.id}">${esc(v.label)} (${new Date(v.created_at).toLocaleDateString()}, ${v.status})</option>`).join('');
     const active = versionsCache.find(v => v.is_active);
@@ -311,7 +327,7 @@ function start() {
             <input class="fAge" type="number" placeholder="Age" value="${item.subject_age ?? ''}" style="width:70px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
             <input class="fHeight" type="number" placeholder="Height (cm)" value="${item.subject_height_cm ?? ''}" style="width:110px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
             <select class="fView" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
-              <option value="" ${!item.camera_view ? 'selected' : ''}>Camera view</option>
+              <option value="" ${!item.camera_view ? 'selected' : ''}>Camera view (auto-detect)</option>
               <option value="front" ${item.camera_view === 'front' ? 'selected' : ''}>Front</option>
               <option value="side" ${item.camera_view === 'side' ? 'selected' : ''}>Side</option>
               <option value="rear" ${item.camera_view === 'rear' ? 'selected' : ''}>Rear</option>
@@ -543,11 +559,29 @@ function start() {
     return out;
   }
 
+  // Guesses side-on vs. facing-the-camera from the pose data itself: a true side-on view has
+  // the left/right shoulders (and hips) nearly overlapping in the x-axis (you're seeing the
+  // body edge-on), while facing the camera spreads them out close to normal shoulder width.
+  // Ratio of shoulder-width-in-pixels to body-height-in-pixels is the signal: low = side-on,
+  // normal (~0.2-0.3, typical human proportions) = facing camera. This is a heuristic, not a
+  // measurement, so it's labeled "auto-detected" rather than treated as certain.
+  function detectCameraView(ok, vidW) {
+    const widths = ok.map(r => (r.lsx != null && r.rsx != null) ? Math.abs(r.lsx - r.rsx) * vidW : null).filter(v => v != null);
+    const heights = ok.map(r => r.bodyPxH).filter(v => v > 0);
+    if (!widths.length || !heights.length) return { view: null, ratio: null };
+    const ratio = +(avg(widths) / avg(heights)).toFixed(3);
+    const view = ratio < 0.15 ? 'side' : 'front'; // 'front' here just means "facing the camera", front or rear
+    return { view, ratio };
+  }
+
   // Computes the 5 user-defined measurement categories from the same raw per-frame landmark data.
+  // cameraView, if the uploader set it, overrides the auto-detected guess below.
   function computeFiveCategories(rows, heightCm, vidW, vidH, cameraView) {
     const ok = rows.filter(r => r.m && r.lay !== undefined);
     const t = ok.map(r => r.t), lay = ok.map(r => r.lay), ray = ok.map(r => r.ray);
     const lax = ok.map(r => r.lax), rax = ok.map(r => r.rax);
+    const detected = detectCameraView(ok, vidW);
+    const effectiveView = cameraView || detected.view;
     const minimaIdx = (arr) => { const o = []; for (let i = 1; i < arr.length - 1; i++) if (arr[i] < arr[i - 1] && arr[i] < arr[i + 1]) o.push(i); return o; };
     const lIdx = minimaIdx(lay), rIdx = minimaIdx(ray);
     const combinedT = [...lIdx.map(i => t[i]), ...rIdx.map(i => t[i])].sort((a, b) => a - b);
@@ -570,8 +604,8 @@ function start() {
     const allStrides = [...strideOf(lIdx, lax), ...strideOf(rIdx, rax)];
     let strideLengthM = null, strideRatio = null;
     if (allStrides.length && mPerPx) { strideLengthM = +(avg(allStrides) * vidW * mPerPx).toFixed(2); strideRatio = +(strideLengthM / (heightCm / 100)).toFixed(2); }
-    const strideReason = !mPerPx ? 'no height provided' : (cameraView !== 'side' ? 'camera view is not side-on, so forward stride distance can\u2019t be measured reliably' : (combinedInt.length < 2 ? 'not enough steps detected' : 'ok'));
-    const strideReliable = !!(strideLengthM && cameraView === 'side' && combinedInt.length >= 2);
+    const strideReason = !mPerPx ? 'no height provided' : (effectiveView !== 'side' ? 'camera view is not side-on, so forward stride distance can\u2019t be measured reliably' : (combinedInt.length < 2 ? 'not enough steps detected' : 'ok'));
+    const strideReliable = !!(strideLengthM && effectiveView === 'side' && combinedInt.length >= 2);
 
     const lKnees = ok.map(r => r.m.form.leftKnee).filter(v => v != null), rKnees = ok.map(r => r.m.form.rightKnee).filter(v => v != null);
     const lHips = ok.map(r => r.m.form.leftHip).filter(v => v != null), rHips = ok.map(r => r.m.form.rightHip).filter(v => v != null);
@@ -592,6 +626,7 @@ function start() {
     const smoothnessCV = deltas.length > 1 ? +(stdev(deltas) / (avg(deltas) || 1e-6) * 100).toFixed(1) : null;
 
     return {
+      view: { manual: cameraView || null, detected: detected.view, detectedRatio: detected.ratio, effective: effectiveView },
       rhythm: { cadence, stepTimeVariabilityPct: stepTimeCV, gaitCycleDurationSec, stepsDetected: combinedT.length },
       stride: { strideLengthM, strideLengthToHeightRatio: strideRatio, reliable: strideReliable, reason: strideReason },
       kneeHip: {
@@ -677,7 +712,7 @@ function start() {
     const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
     const notes = [];
     if (!item || item.subject_age == null) notes.push('userAge was not provided by the uploader; it is self-reported, not derived from the video.');
-    if (!item || !item.camera_view) notes.push('cameraView was not selected by the uploader; it cannot be reliably auto-detected from pose landmarks.');
+    if (!camView && c.view.detected) notes.push('cameraView was not manually selected; it was auto-detected from body proportions in the pose data (shoulder-width-to-height ratio) with ratio ' + c.view.detectedRatio + ' — treat this as a best-effort guess, not a certainty.');
     if (!eg.calibrated) notes.push('No height was provided, so stepWidthVariability, walkingSpeedMps and footClearanceCm are normalized (unitless) screen-space values, not real-world units.');
     if (eg.validGaitCycles < 2) notes.push('Very few gait cycles were detected in this clip; metrics derived from step timing may be unreliable.');
     if (!c.stride.reliable) notes.push('strideLengthM/strideLengthToHeightRatio are not reliable here: ' + c.stride.reason + '.');
@@ -685,7 +720,8 @@ function start() {
     return {
       userAge: (item && item.subject_age) ?? null,
       videoDurationSeconds: vid.duration ? +vid.duration.toFixed(1) : null,
-      cameraView: camView || 'unknown',
+      cameraView: c.view.effective || 'unknown',
+      cameraViewSource: camView ? 'manually selected' : 'auto-detected from pose data',
       poseQuality: qualityLabel(eg.validFrameRatio, eg.landmarkVisibility),
       metrics: {
         cadenceStepsPerMin: { value: eg.cadence, unit: 'steps/min', method: 'detected foot events' },
@@ -760,8 +796,12 @@ function start() {
     const heightCm = item && item.subject_height_cm || null, camView = item && item.camera_view || null;
     const c = computeFiveCategories(rows, heightCm, vid.videoWidth, vid.videoHeight, camView);
     const row = (label, val, unit) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span class="dim">${label}</span><span>${val ?? '—'}${val != null ? ' ' + unit : ''}</span></div>`;
+    const viewLabel = c.view.manual
+      ? c.view.manual + ' (you selected this)'
+      : (c.view.detected ? c.view.detected + ' (auto-detected from the video' + (c.view.detectedRatio != null ? ', shoulder/height ratio ' + c.view.detectedRatio : '') + ')' : 'could not auto-detect');
     let html = `<div>Pose found in ${ok.length}/${rows.length} sampled frames.</div>
-      <div class="dim" style="font-size:11px;margin-top:2px">On file for this video — height: ${heightCm ? heightCm + 'cm' : 'not provided'} &middot; camera view: ${camView || 'not set'}</div>
+      <div class="dim" style="font-size:11px;margin-top:2px">On file for this video — height: ${heightCm ? heightCm + 'cm' : 'not provided'} &middot; camera view: ${viewLabel}</div>
+      ${!heightCm ? '<div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span>Add height for stride length &amp; foot clearance in real units (optional — everything else still works without it).</span><button class="addHeightBtn" style="white-space:nowrap;border:1px solid var(--border);border-radius:8px;padding:6px 10px;background:var(--surface);color:var(--text)">Add height</button></div>' : ''}
       <div style="margin-top:10px"><b>1. Walking rhythm &amp; cadence</b>
         ${row('Cadence', c.rhythm.cadence, 'steps/min')}
         ${row('Step-time variability', c.rhythm.stepTimeVariabilityPct, '%')}
@@ -770,7 +810,7 @@ function start() {
       <div style="margin-top:10px"><b>2. Stride length vs. height</b>
         ${row('Stride length', c.stride.strideLengthM, 'm')}
         ${row('Stride / height ratio', c.stride.strideLengthToHeightRatio, '')}
-        <div class="dim" style="font-size:11px;margin-top:2px">${c.stride.reliable ? 'Reliable — height provided and a side-on camera view.' : 'Not reliable: ' + c.stride.reason + '.'}</div>
+        <div class="dim" style="font-size:11px;margin-top:2px">${c.stride.reliable ? 'Reliable — height provided and a side-on camera view (' + viewLabel + ').' : 'Not reliable: ' + c.stride.reason + '. Detected view: ' + viewLabel + '. If this looks wrong, set Camera view manually in Edit info to override it.'}</div>
       </div>
       <div style="margin-top:10px"><b>3. Knee flexion &amp; hip extension</b>
         ${row('Avg knee angle (L / R)', (c.kneeHip.avgLeftKnee ?? '—') + ' / ' + (c.kneeHip.avgRightKnee ?? '—'), '&deg;')}
@@ -805,6 +845,15 @@ function start() {
     el.innerHTML = html;
     const aiBtn = el.querySelector('.aiBtn'), aiBox = el.querySelector('.aiBox');
     if (aiBtn) aiBtn.onclick = () => requestAssessment(aiBtn, aiBox, rows, vid, item);
+    const addHeightBtn = el.querySelector('.addHeightBtn');
+    if (addHeightBtn) addHeightBtn.onclick = () => {
+      const card = el.closest('.card');
+      if (!card) return;
+      const infoBox = card.querySelector('.infoBox');
+      infoBox.style.display = 'block';
+      const hInput = card.querySelector('.fHeight');
+      if (hInput) { hInput.focus(); hInput.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    };
     loadTrunkPercentile(el, c.trunk.swayNormalized, c.trunk.smoothnessVariabilityPct);
     return { gait: gaitMetrics(rows), age: gaitAgeEstimate(gaitMetrics(rows)) };
   }
@@ -832,6 +881,7 @@ function start() {
           t: T, m: metricsFromLandmarks(p),
           lay: p[27].y, ray: p[28].y, lax: p[27].x, rax: p[28].x,
           lwx: p[15].x, rwx: p[16].x,
+          lsx: p[11].x, rsx: p[12].x,
           trunkX: ((p[11].x + p[12].x) / 2 + (p[23].x + p[24].x) / 2) / 2,
           vis: p.reduce((a, q) => a + (q.visibility || 0), 0) / p.length,
           bodyPxH: (((p[27].y + p[28].y) / 2) - p[0].y) * (vid.videoHeight || 0)
