@@ -53,10 +53,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // The only account allowed to refresh the reference table from the app. Everyone can still VIEW it.
-const OWNER_EMAIL = 'PASTE_YOUR_LOGIN_EMAIL_HERE';
+const OWNER_EMAIL = 'sharonlixr@gmail.com';
 // =================================================
 
 const app = document.getElementById('app');
@@ -81,6 +81,14 @@ function start() {
     who.innerHTML = '';
     if (!user) return renderAuth();
     who.innerHTML = '<span>' + esc(user.email) + '</span>';
+    const s = document.createElement('button'); s.className = 'text'; s.textContent = '⚙ Settings';
+    s.onclick = () => {
+      const panel = document.getElementById('settingsPanel');
+      if (!panel) return;
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      if (panel.style.display === 'block') renderSettingsPanel(panel);
+    };
+    who.appendChild(s);
     const b = document.createElement('button'); b.className = 'text'; b.textContent = 'Log out';
     b.onclick = () => sb.auth.signOut();
     who.appendChild(b);
@@ -111,7 +119,8 @@ function start() {
   }
 
   function renderDash() {
-    app.innerHTML = `<div class="upload"><p>Upload a video. It is saved to your account and available on any device.</p>
+    app.innerHTML = `<div id="settingsPanel" style="display:none;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border);font-size:12px"></div>
+      <div class="upload"><p>Upload a video. It is saved to your account and available on any device.</p>
       <button class="primary" id="pick">Choose video</button><input type="file" id="file" accept="video/*">
       <div style="margin-top:14px;text-align:left;font-size:12px;color:var(--muted)">Optional — helps the AI assessment be more accurate:
         <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
@@ -127,10 +136,6 @@ function start() {
       </div>
       <div class="msg" id="upmsg"></div></div>
       <div class="grid" id="grid"></div>
-      <div style="margin-top:28px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
-        <button class="text" id="settingsToggle" style="border:1px solid var(--border);border-radius:8px">&#9881; Settings</button>
-        <div id="settingsPanel" style="display:none;margin-top:12px;font-size:12px"></div>
-      </div>
       <div style="margin-top:28px"><b>Gait age history</b>
         <div class="dim" style="font-size:12px;margin:4px 0 10px">Every time you run Analyze pose on a walking clip, the parameters and estimate are saved here so you can compare over time.</div>
         <div id="history"></div>
@@ -159,44 +164,111 @@ function start() {
     loadGrid();
     loadHistory();
     loadReferenceData();
-    const panel = document.getElementById('settingsPanel');
-    document.getElementById('settingsToggle').onclick = () => {
-      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-      if (panel.style.display === 'block') renderSettingsPanel(panel);
-    };
   }
 
-  function renderSettingsPanel(panel) {
+  let versionsCache = [];
+
+  async function loadVersions() {
+    const { data, error } = await sb.from('gait_reference_versions').select('*').order('created_at', { ascending: false });
+    versionsCache = (!error && data) ? data : [];
+    return versionsCache;
+  }
+
+  async function renderSettingsPanel(panel) {
     const isOwner = user && user.email === OWNER_EMAIL;
-    panel.innerHTML = `
-      <div id="refStatus" class="dim" style="font-size:11px">Reference table: loading…</div>
-      ${isOwner ? '<button class="text" id="refreshRef" style="border:1px solid var(--border);border-radius:8px;margin-top:8px">Refresh reference data</button>' : '<div class="dim" style="font-size:11px;margin-top:6px">Only the app owner can refresh the reference table. Everyone can view its source below.</div>'}
-      <div style="margin-top:14px"><button class="text" id="srcToggle" style="border:1px solid var(--border);border-radius:8px">Source of reference</button>
-        <div id="srcBox" style="display:none;margin-top:10px"></div>
+    panel.innerHTML = `<div class="dim" style="font-size:11px;margin-bottom:10px">${isOwner ? 'You are the app owner — you can refresh and switch the active reference dataset.' : 'Only the app owner can refresh or switch the reference dataset. You can view its source below.'}</div>
+      <div style="margin-bottom:10px">
+        <label class="dim" style="display:block;font-size:11px;margin-bottom:4px">Source of reference</label>
+        <select id="sourceSelect" ${isOwner ? '' : 'disabled'} style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:12px"></select>
+        <div id="sourceDetail" class="dim" style="font-size:11px;margin-top:6px;line-height:1.5"></div>
+      </div>
+      <div>
+        <label class="dim" style="display:block;font-size:11px;margin-bottom:4px">Refresh source</label>
+        <select id="refreshSelect" disabled style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:12px"></select>
+        ${isOwner ? '<button class="text" id="refreshBtn" style="border:1px solid var(--border);border-radius:8px;margin-top:8px;width:100%">Check for updated research data</button>' : ''}
+        <div id="refreshStatus" class="dim" style="font-size:11px;margin-top:6px"></div>
       </div>`;
-    loadReferenceData();
-    if (isOwner) document.getElementById('refreshRef').onclick = async (e) => {
-      e.target.disabled = true; e.target.textContent = 'Refreshing…';
+
+    await loadVersions();
+    if (!versionsCache.length) await ensureDefaultVersion();
+    populateVersionDropdowns();
+
+    const sourceSelect = document.getElementById('sourceSelect');
+    sourceSelect.onchange = async () => {
+      if (!isOwner) return;
+      const id = sourceSelect.value;
+      await sb.from('gait_reference_versions').update({ is_active: false }).neq('id', id);
+      await sb.from('gait_reference_versions').update({ is_active: true }).eq('id', id);
+      await loadVersions();
+      populateVersionDropdowns();
       await loadReferenceData();
-      e.target.disabled = false; e.target.textContent = 'Refresh reference data';
     };
-    document.getElementById('srcToggle').onclick = () => {
-      const box = document.getElementById('srcBox');
-      if (box.style.display === 'none') { box.style.display = 'block'; renderSourceBox(box); }
-      else box.style.display = 'none';
+
+    const refreshSelect = document.getElementById('refreshSelect');
+    refreshSelect.onchange = () => showSourceDetail(refreshSelect.value);
+
+    if (isOwner) document.getElementById('refreshBtn').onclick = async (e) => {
+      const status = document.getElementById('refreshStatus');
+      e.target.disabled = true; e.target.textContent = 'Searching…';
+      status.textContent = 'Asking the research-check service for an updated dataset — this can take 10-20 seconds.';
+      try {
+        const { data, error } = await sb.functions.invoke('refresh-gait-reference', { body: {} });
+        if (error) throw error;
+        if (!data || !data.found) {
+          status.textContent = 'No newer credible dataset was found. Current data unchanged.';
+        } else {
+          const { data: vRow, error: vErr } = await sb.from('gait_reference_versions').insert({
+            label: data.sourceLabel || ('Found ' + new Date().toLocaleDateString()),
+            source_note: data.sourceNote || data.sourceUrl || null,
+            status: 'pending_review', is_active: false
+          }).select().single();
+          if (vErr) throw vErr;
+          const rows = (data.bands || []).map(b => ({ version_id: vRow.id, band: b.band, mid: b.mid, cadence: b.cadence, stride_length: b.strideLength, knee_rom: b.kneeROM, knee_height_var: b.kneeHeightVar }));
+          if (rows.length) await sb.from('gait_reference').insert(rows);
+          await loadVersions();
+          populateVersionDropdowns();
+          status.textContent = 'Found "' + (data.sourceLabel || 'a new dataset') + '" — added to the lists below as pending review. Select it from "Source of reference" to make it active.';
+        }
+      } catch (err) {
+        status.textContent = 'Could not check for updates: ' + esc(String((err && err.message) || err));
+      }
+      e.target.disabled = false; e.target.textContent = 'Check for updated research data';
     };
   }
 
-  function renderSourceBox(box) {
-    box.innerHTML = `<div class="dim" style="line-height:1.6">
-      <b>Source:</b> PMC6660692 (PubMed Central) — a published motion-capture study of healthy adults, reporting mean gait measurements grouped by age decade. Read-only reference data, not editable from the app.<br>
-      <b>Used for scoring:</b> cadence, stride length, knee flexion-extension range, and knee-height variation (used as an approximate stand-in for foot clearance).<br>
-      <b>Not used for scoring</b> (shown here for context only — this app measures trunk motion differently from how the source study measured it, so a numeric comparison isn't valid): the source also reports <i>trunk tilt</i> (forward/back lean, degrees), <i>trunk obliquity</i> (side-to-side sway, degrees), and <i>trunk rotation</i> (degrees), each by age decade.
-      <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px">
+  async function ensureDefaultVersion() {
+    // First run: no versions table rows yet. Create one "default" version and attach
+    // any existing unversioned gait_reference rows to it, so the dropdowns aren't empty.
+    const { data: vRow, error: vErr } = await sb.from('gait_reference_versions').insert({
+      label: 'PMC6660692 (default)',
+      source_note: 'PubMed Central — published motion-capture study of healthy adults, mean gait measurements by age decade.',
+      status: 'verified', is_active: true
+    }).select().single();
+    if (vErr || !vRow) return;
+    await sb.from('gait_reference').update({ version_id: vRow.id }).is('version_id', null);
+    await loadVersions();
+  }
+
+  function populateVersionDropdowns() {
+    const sourceSelect = document.getElementById('sourceSelect'), refreshSelect = document.getElementById('refreshSelect');
+    if (!sourceSelect) return;
+    sourceSelect.innerHTML = versionsCache.map(v => `<option value="${v.id}" ${v.is_active ? 'selected' : ''}>${esc(v.label)}${v.is_active ? ' (active)' : ''}</option>`).join('');
+    refreshSelect.innerHTML = '<option value="">— history of checks / candidates —</option>' + versionsCache.map(v => `<option value="${v.id}">${esc(v.label)} (${new Date(v.created_at).toLocaleDateString()}, ${v.status})</option>`).join('');
+    const active = versionsCache.find(v => v.is_active);
+    if (active) showSourceDetail(active.id);
+  }
+
+  async function showSourceDetail(versionId) {
+    const el = document.getElementById('sourceDetail');
+    if (!el || !versionId) return;
+    const v = versionsCache.find(x => x.id === versionId);
+    if (!v) return;
+    const { data: rows } = await sb.from('gait_reference').select('*').eq('version_id', versionId).order('mid');
+    el.innerHTML = `<b>${esc(v.label)}</b> &middot; status: ${v.status}${v.source_note ? '<br>' + esc(v.source_note) : ''}
+      <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11px">
         <tr><th style="text-align:left;padding:3px 6px 3px 0">Band</th><th style="text-align:left;padding:3px 6px 3px 0">Cadence</th><th style="text-align:left;padding:3px 6px 3px 0">Stride (m)</th><th style="text-align:left;padding:3px 6px 3px 0">Knee ROM</th><th style="text-align:left;padding:3px 6px 3px 0">Knee ht. var.</th></tr>
-        ${referenceData.map(b => `<tr><td style="padding:3px 6px 3px 0">${b.band}</td><td style="padding:3px 6px 3px 0">${b.cadence}</td><td style="padding:3px 6px 3px 0">${b.strideLength}</td><td style="padding:3px 6px 3px 0">${b.kneeROM}</td><td style="padding:3px 6px 3px 0">${b.kneeHeightVar}</td></tr>`).join('')}
-      </table>
-    </div>`;
+        ${(rows || []).map(b => `<tr><td style="padding:3px 6px 3px 0">${b.band}</td><td style="padding:3px 6px 3px 0">${b.cadence ?? '—'}</td><td style="padding:3px 6px 3px 0">${b.stride_length ?? '—'}</td><td style="padding:3px 6px 3px 0">${b.knee_rom ?? '—'}</td><td style="padding:3px 6px 3px 0">${b.knee_height_var ?? '—'}</td></tr>`).join('')}
+      </table>`;
   }
 
   async function loadHistory() {
@@ -233,7 +305,20 @@ function start() {
       const card = document.createElement('div'); card.className = 'card';
       card.innerHTML = `<video src="${url}" controls playsinline crossorigin="anonymous" preload="metadata"></video>
         <div class="meta"><span class="title">${esc(item.title || 'video')}</span>
-        <button class="dl">Download</button><button class="del">Delete</button></div>
+        <button class="dl">Download</button><button class="editInfo">Edit info</button><button class="del">Delete</button></div>
+        <div class="infoBox" style="display:none;padding:0 14px 14px;font-size:12px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <input class="fAge" type="number" placeholder="Age" value="${item.subject_age ?? ''}" style="width:70px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
+            <input class="fHeight" type="number" placeholder="Height (cm)" value="${item.subject_height_cm ?? ''}" style="width:110px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
+            <select class="fView" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px">
+              <option value="" ${!item.camera_view ? 'selected' : ''}>Camera view</option>
+              <option value="front" ${item.camera_view === 'front' ? 'selected' : ''}>Front</option>
+              <option value="side" ${item.camera_view === 'side' ? 'selected' : ''}>Side</option>
+              <option value="rear" ${item.camera_view === 'rear' ? 'selected' : ''}>Rear</option>
+            </select>
+          </div>
+          <button class="saveInfo primary">Save</button>
+        </div>
         <div class="arow"><button class="an">Analyze pose</button></div>
         <div class="report" style="display:none"></div>`;
       const vid = card.querySelector('video'), rep = card.querySelector('.report');
@@ -246,6 +331,17 @@ function start() {
         if (!confirm('Delete this video?')) return;
         await sb.storage.from('videos').remove([item.path]);
         await sb.from('videos').delete().eq('id', item.id);
+        loadGrid();
+      };
+      const infoBox = card.querySelector('.infoBox');
+      card.querySelector('.editInfo').onclick = () => { infoBox.style.display = infoBox.style.display === 'none' ? 'block' : 'none'; };
+      card.querySelector('.saveInfo').onclick = async (e) => {
+        const ageV = card.querySelector('.fAge').value, hV = card.querySelector('.fHeight').value, vV = card.querySelector('.fView').value;
+        e.target.disabled = true; e.target.textContent = 'Saving…';
+        await sb.from('videos').update({
+          subject_age: ageV ? +ageV : null, subject_height_cm: hV ? +hV : null, camera_view: vV || null
+        }).eq('id', item.id);
+        e.target.disabled = false; e.target.textContent = 'Save';
         loadGrid();
       };
       card.querySelector('.an').onclick = () => analyze(vid, rep, item);
@@ -409,14 +505,20 @@ function start() {
 
   async function loadReferenceData() {
     try {
-      const { data, error } = await sb.from('gait_reference').select('*').order('mid');
+      // Pick whichever gait_reference_versions row is marked active, and only use
+      // that version's rows for comparisons. Falls back to the hardcoded default
+      // above if the versions table doesn't exist yet (pre-migration) or is empty.
+      let activeId = null;
+      const { data: activeVer } = await sb.from('gait_reference_versions').select('id').eq('is_active', true).limit(1).maybeSingle();
+      if (activeVer) activeId = activeVer.id;
+      let query = sb.from('gait_reference').select('*').order('mid');
+      query = activeId ? query.eq('version_id', activeId) : query.is('version_id', null);
+      const { data, error } = await query;
       if (!error && data && data.length) {
         referenceData = data.map(r => ({ band: r.band, mid: +r.mid, cadence: +r.cadence, strideLength: +r.stride_length, kneeROM: +r.knee_rom, kneeHeightVar: +r.knee_height_var }));
         referenceSource = 'Supabase'; referenceLoadedAt = new Date();
       }
-    } catch (e) { /* keep whatever referenceData currently holds */ }
-    const el = document.getElementById('refStatus');
-    if (el) el.textContent = `Reference table: ${referenceData.length} bands, from ${referenceSource}${referenceLoadedAt ? ' at ' + referenceLoadedAt.toLocaleTimeString() : ''}`;
+    } catch (e) { /* keep whatever referenceData currently holds, including the hardcoded fallback */ }
   }
 
   function matchAge(value, key) {
