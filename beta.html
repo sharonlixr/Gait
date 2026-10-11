@@ -53,8 +53,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ====== PASTE YOUR TWO SUPABASE VALUES HERE ======
-const SUPABASE_URL = 'https://twpmdbqgtugvcmljhlij.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_-DfEuzabu57Sj1X7jyShuw_vBqF-89A';
+const SUPABASE_URL = 'PASTE_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_ANON_KEY_HERE';
 // The only account allowed to refresh the reference table from the app. Everyone can still VIEW it.
 const OWNER_EMAIL = 'sharonlixr@gmail.com';
 // =================================================
@@ -237,7 +237,18 @@ function start() {
           status.textContent = 'Found "' + (data.sourceLabel || 'a new dataset') + '" — added to the lists below as pending review. Select it from "Source of reference" to make it active.';
         }
       } catch (err) {
-        status.textContent = 'Could not check for updates: ' + esc(String((err && err.message) || err));
+        // supabase-js's default error.message for a non-2xx Edge Function response is just
+        // "Edge Function returned a non-2xx status code" -- it doesn't include what the
+        // function actually said. err.context is the raw Response; read its body for the
+        // real reason (e.g. "OPENAI_API_KEY is not set", or an OpenAI API error detail).
+        let detail = String((err && err.message) || err);
+        try {
+          if (err && err.context && typeof err.context.text === 'function') {
+            const bodyText = await err.context.text();
+            if (bodyText) detail += ' — ' + bodyText.slice(0, 300);
+          }
+        } catch (_e) { /* ignore, show what we have */ }
+        status.textContent = 'Could not check for updates: ' + esc(detail);
       }
       e.target.disabled = false; e.target.textContent = 'Check for updated research data';
     };
@@ -277,8 +288,8 @@ function start() {
     // on some RLS/grant setups even when the insert itself succeeds, which previously
     // caused this whole function to bail out silently and leave the dropdown empty.
     const { error: insErr } = await sb.from('gait_reference_versions').insert({
-      label: 'PMC6660692 (default)',
-      source_note: 'PubMed Central — published motion-capture study of healthy adults, mean gait measurements by age decade.',
+      label: 'Latorre et al. 2019 (PMC6660692)',
+      source_note: 'Title: "Gait analysis with the Kinect v2: normative study with healthy individuals and comparison with 3D marker-based systems." Authors: Latorre J, Colomer C, Alcañiz M, Llorens R. Journal: Journal of NeuroEngineering and Rehabilitation, 2019. Motion-capture normative gait study of healthy adults, mean values by age decade.',
       status: 'verified', is_active: true
     });
     if (insErr) {
@@ -555,8 +566,10 @@ function start() {
     el.innerHTML = `Vs. your own history (${swayVals.length} recordings): lateral sway is higher than ${swayPct ?? '—'}% of your past videos &middot; movement smoothness variability is higher than ${smoothPct ?? '—'}% of your past videos (lower % = smoother than usual).`;
   }
 
-  // Source: PMC6660692 (PubMed Central) — healthy-adult gait parameters by age decade,
-  // motion-capture study. 10-19 band excluded (adolescent growth skews it for adult comparison).
+  // Source: Latorre J, Colomer C, Alcañiz M, Llorens R. "Gait analysis with the Kinect v2:
+  // normative study with healthy individuals and comparison with 3D marker-based systems."
+  // Journal of NeuroEngineering and Rehabilitation, 2019. (PMC6660692) — healthy-adult gait
+  // parameters by age decade, motion-capture study. 10-19 band excluded (adolescent growth skews it for adult comparison).
   // kneeHeightVar is used as an approximate stand-in for foot clearance; the published age
   // trend for it is weak/noisy, so matches from it are flagged low-confidence.
   // Hardcoded fallback only — the live source of truth is the gait_reference table in Supabase.
